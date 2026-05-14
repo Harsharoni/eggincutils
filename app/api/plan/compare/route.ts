@@ -33,6 +33,7 @@ export async function POST(request: Request): Promise<Response> {
         rare: parsed.data.includeDropRare,
         epic: parsed.data.includeDropEpic,
         legendary: parsed.data.includeDropLegendary,
+        fragments: parsed.data.includeDropFragments,
       },
       targetCraftedOnly: parsed.data.targetCraftedOnly,
     });

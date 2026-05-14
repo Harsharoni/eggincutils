@@ -57,6 +57,7 @@ type BackupMissionInfo = {
 type GetPlayerProfileOptions = {
   includeArtifactRarities?: Partial<ShinyRaritySelection>;
   includeShinyArtifacts?: boolean;
+  includeStoneFragments?: boolean;
   inventorySource?: InventorySource;
 };
 
@@ -114,6 +115,7 @@ export async function getPlayerProfile(
   const includeArtifactRarities = normalizeShinyRaritySelection(
     options.includeArtifactRarities ?? options.includeShinyArtifacts
   );
+  const includeStoneFragments = options.includeStoneFragments !== false;
   const inventorySource = options.inventorySource || "main";
 
   let lastError: unknown = null;
@@ -177,7 +179,8 @@ export async function getPlayerProfile(
       const inventory = parseInventory(
         inventoryItems,
         includeSlotted,
-        includeArtifactRarities
+        includeArtifactRarities,
+        includeStoneFragments
       );
       const craftCounts = parseCraftCounts(data.backup?.artifactsDb?.artifactStatus || []);
       const missionArchive = data.backup?.artifactsDb?.missionArchive || [];
@@ -285,14 +288,22 @@ function isShinyArtifactRarity(rarity: unknown): boolean {
   return SHINY_RARITIES.has(rarity.trim().toUpperCase());
 }
 
+function isStoneFragmentSpec(spec?: { name?: string }): boolean {
+  return typeof spec?.name === "string" && spec.name.trim().toUpperCase().endsWith("_STONE_FRAGMENT");
+}
+
 export function parseInventory(
   items: BackupInventoryItem[],
   includeSlotted: boolean,
-  includeShinyArtifacts: boolean | Partial<ShinyRaritySelection> = true
+  includeShinyArtifacts: boolean | Partial<ShinyRaritySelection> = true,
+  includeStoneFragments = true
 ): Inventory {
   const inventory = {} as Inventory;
   const includeShinyRarities = normalizeShinyRaritySelection(includeShinyArtifacts);
   const addQuantity = (spec: { name?: string; level?: string | number }, quantity: number) => {
+    if (!includeStoneFragments && isStoneFragmentSpec(spec)) {
+      return;
+    }
     const name = formatSpecName(spec);
     if (!name || quantity <= 0) {
       return;

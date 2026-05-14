@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const DURATION_TYPES = ["TUTORIAL", "SHORT", "LONG", "EPIC"] as const;
 const INVENTORY_SOURCES = ["main", "virtue"] as const;
+const PLAN_MODES = ["artifact", "xp"] as const;
 const FALSEY_STRINGS = new Set(["0", "false", "no", "off"]);
 
 const nonNegativeFiniteSchema = z.number().finite().min(0);
@@ -50,6 +51,7 @@ export const profileQuerySchema = z
     includeInventoryRare: z.string().optional(),
     includeInventoryEpic: z.string().optional(),
     includeInventoryLegendary: z.string().optional(),
+    includeInventoryFragments: z.string().optional(),
   })
   .transform((value) => ({
     eid: value.eid,
@@ -58,6 +60,7 @@ export const profileQuerySchema = z
     includeInventoryRare: parseEnabledByDefault(value.includeInventoryRare, true),
     includeInventoryEpic: parseEnabledByDefault(value.includeInventoryEpic, true),
     includeInventoryLegendary: parseEnabledByDefault(value.includeInventoryLegendary, true),
+    includeInventoryFragments: parseEnabledByDefault(value.includeInventoryFragments, true),
   }));
 
 export type ProfileQuery = z.infer<typeof profileQuerySchema>;
@@ -65,6 +68,7 @@ export type ProfileQuery = z.infer<typeof profileQuerySchema>;
 export const planRequestSchema = z
   .object({
     eid: z.string().trim().default(""),
+    planMode: z.enum(PLAN_MODES).optional().default("artifact"),
     targetItemId: z.string().trim().min(1, "targetItemId is required"),
     quantity: z.coerce
       .number()
@@ -77,14 +81,21 @@ export const planRequestSchema = z
       .finite()
       .default(0.5)
       .transform((value) => Math.max(0, Math.min(1, value))),
+    horizonDays: z.coerce
+      .number()
+      .finite()
+      .default(1)
+      .transform((value) => Math.max(0.01, Math.min(10, value))),
     inventorySource: z.string().optional(),
     includeSlotted: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeInventoryRare: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeInventoryEpic: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeInventoryLegendary: z.union([z.boolean(), z.number(), z.string()]).optional(),
+    includeInventoryFragments: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeDropRare: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeDropEpic: z.union([z.boolean(), z.number(), z.string()]).optional(),
     includeDropLegendary: z.union([z.boolean(), z.number(), z.string()]).optional(),
+    includeDropFragments: z.union([z.boolean(), z.number(), z.string()]).optional(),
     targetCraftedOnly: z.union([z.boolean(), z.number(), z.string()]).optional(),
     fastMode: z.union([z.boolean(), z.number(), z.string()]).optional(),
     allowedShipDurations: z
@@ -93,17 +104,21 @@ export const planRequestSchema = z
   })
   .transform((value) => ({
     eid: value.eid,
+    planMode: value.planMode,
     targetItemId: value.targetItemId,
     quantity: value.quantity,
     priorityTime: value.priorityTime,
+    horizonDays: value.horizonDays,
     inventorySource: parseInventorySource(value.inventorySource),
     includeSlotted: parseIncludeSlotted(value.includeSlotted),
     includeInventoryRare: parseEnabledByDefault(value.includeInventoryRare, true),
     includeInventoryEpic: parseEnabledByDefault(value.includeInventoryEpic, true),
     includeInventoryLegendary: parseEnabledByDefault(value.includeInventoryLegendary, true),
+    includeInventoryFragments: parseEnabledByDefault(value.includeInventoryFragments, true),
     includeDropRare: parseEnabledByDefault(value.includeDropRare, true),
     includeDropEpic: parseEnabledByDefault(value.includeDropEpic, true),
     includeDropLegendary: parseEnabledByDefault(value.includeDropLegendary, true),
+    includeDropFragments: parseEnabledByDefault(value.includeDropFragments, true),
     targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
     fastMode: parseFastMode(value.fastMode),
     allowedShipDurations: value.allowedShipDurations,
@@ -180,6 +195,7 @@ export const replanRequestSchema = z.object({
   includeDropRare: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropEpic: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropLegendary: z.union([z.boolean(), z.number(), z.string()]).optional(),
+  includeDropFragments: z.union([z.boolean(), z.number(), z.string()]).optional(),
   targetCraftedOnly: z.union([z.boolean(), z.number(), z.string()]).optional(),
   allowedShipDurations: z
     .array(z.object({ ship: z.string().min(1), durationType: z.enum(["SHORT", "LONG", "EPIC"]) }))
@@ -192,6 +208,7 @@ export const replanRequestSchema = z.object({
   includeDropRare: parseEnabledByDefault(value.includeDropRare, true),
   includeDropEpic: parseEnabledByDefault(value.includeDropEpic, true),
   includeDropLegendary: parseEnabledByDefault(value.includeDropLegendary, true),
+  includeDropFragments: parseEnabledByDefault(value.includeDropFragments, true),
   targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
 }));
 
@@ -255,6 +272,7 @@ const availableComboSchema = z.object({
 });
 
 export const plannerResultSchema = z.object({
+  mode: z.enum(PLAN_MODES).optional(),
   targetItemId: z.string().min(1),
   quantity: nonNegativeIntSchema,
   priorityTime: z.number().finite().min(0).max(1),
@@ -273,6 +291,15 @@ export const plannerResultSchema = z.object({
   }),
   notes: z.array(z.string()),
   availableCombos: z.array(availableComboSchema),
+  horizonDays: z.number().finite().min(0).optional(),
+  maxXp: z
+    .object({
+      totalXp: nonNegativeFiniteSchema,
+      totalGeCost: nonNegativeFiniteSchema,
+      remainingInventory: z.record(z.string(), nonNegativeFiniteSchema),
+      finalCraftCounts: z.record(z.string(), nonNegativeFiniteSchema),
+    })
+    .optional(),
 });
 
 export const planApiResponseSchema = z.object({
@@ -309,12 +336,14 @@ export const compareRequestSchema = z.object({
   includeDropRare: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropEpic: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropLegendary: z.union([z.boolean(), z.number(), z.string()]).optional(),
+  includeDropFragments: z.union([z.boolean(), z.number(), z.string()]).optional(),
   targetCraftedOnly: z.union([z.boolean(), z.number(), z.string()]).optional(),
 }).transform((value) => ({
   ...value,
   includeDropRare: parseEnabledByDefault(value.includeDropRare, true),
   includeDropEpic: parseEnabledByDefault(value.includeDropEpic, true),
   includeDropLegendary: parseEnabledByDefault(value.includeDropLegendary, true),
+  includeDropFragments: parseEnabledByDefault(value.includeDropFragments, true),
   targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
 }));
 

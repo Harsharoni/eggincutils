@@ -6,6 +6,31 @@
   background: color-mix(in oklab, var(--card), transparent 20%);
 }
 
+.modeToggle {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  width: 100%;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--field), var(--panel) 24%);
+}
+
+.modeToggle button {
+  border: 0;
+  border-radius: 0;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.modeToggle button[data-active="1"] {
+  background: color-mix(in oklab, var(--accent), transparent 68%);
+  color: var(--ink);
+}
+
 .targetPicker {
   position: relative;
 }
@@ -131,7 +156,7 @@
 
 .sourceMatrix {
   display: grid;
-  grid-template-columns: minmax(82px, auto) repeat(4, minmax(40px, auto));
+  grid-template-columns: minmax(82px, auto) repeat(5, minmax(40px, auto));
   gap: 6px 8px;
   align-items: center;
   padding: 8px 10px;
@@ -410,7 +435,7 @@
 
 @media (max-width: 900px) {
   .sourceMatrix {
-    grid-template-columns: minmax(72px, auto) repeat(4, minmax(36px, auto));
+    grid-template-columns: minmax(72px, auto) repeat(5, minmax(36px, auto));
   }
 
   .actionColumn {

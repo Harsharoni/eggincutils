@@ -56,6 +56,7 @@ export async function POST(request: Request): Promise<Response> {
           rare: parsedPayload.data.includeDropRare,
           epic: parsedPayload.data.includeDropEpic,
           legendary: parsedPayload.data.includeDropLegendary,
+          fragments: parsedPayload.data.includeDropFragments,
         },
         targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
         allowedShipDurations: parsedPayload.data.allowedShipDurations,
