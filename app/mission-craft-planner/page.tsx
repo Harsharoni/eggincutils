@@ -25,7 +25,7 @@ import {
   writeStoredString,
 } from "../../lib/local-preferences";
 import useHighsWorker from "../../lib/use-highs-worker";
-import { planForMaxXpHorizon, planForTarget, computeMonolithicPaths, type PlannerProgressEvent } from "../../lib/planner";
+import { planForTarget, computeMonolithicPaths, type PlannerProgressEvent } from "../../lib/planner";
 import { createDemoProfile, isBlankEid } from "../../lib/demo-profile";
 import type { LootJson } from "../../lib/loot-data";
 import styles from "./page.module.css";
@@ -46,7 +46,6 @@ type ShipLevelInfoDetailed = ShipLevelInfo & {
 };
 
 type InventorySource = "main" | "virtue";
-type PlannerMode = "artifact" | "xp";
 
 type MissionOption = {
   ship: string;
@@ -73,11 +72,9 @@ type PlannerSourceFilters = {
   includeInventoryRare: boolean;
   includeInventoryEpic: boolean;
   includeInventoryLegendary: boolean;
-  includeInventoryFragments: boolean;
   includeDropRare: boolean;
   includeDropEpic: boolean;
   includeDropLegendary: boolean;
-  includeDropFragments: boolean;
 };
 
 type ProfileApiResponse = ProfileSnapshot & { error?: string; details?: unknown };
@@ -90,7 +87,6 @@ type PlanResponse = {
     shipLevels: ShipLevelInfo[];
   };
   plan: {
-    mode?: PlannerMode;
     targetItemId: string;
     quantity: number;
     priorityTime: number;
@@ -134,13 +130,6 @@ type PlanResponse = {
       durationType: string;
       targetAfxId: number;
     }>;
-    horizonDays?: number;
-    maxXp?: {
-      totalXp: number;
-      totalGeCost: number;
-      remainingInventory: Record<string, number>;
-      finalCraftCounts: Record<string, number>;
-    };
   };
 };
 
@@ -166,10 +155,8 @@ type MonolithicPathResult = {
 };
 
 type SolveSnapshotRequest = {
-  planMode: PlannerMode;
   targetItemId: string;
   quantity: number;
-  horizonDays: number;
   targetCraftedOnly: boolean;
   priorityTime: number;
   fastMode: boolean;
@@ -568,38 +555,35 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
     })
     .filter((segment): segment is TimelineSegment => segment !== null);
 
-  let missionSegments = rawMissionSegments;
-  if (plan.mode !== "xp") {
-    const remainingPrepByShipDuration = new Map<string, number>();
-    for (const prepSegment of prepSegments) {
-      const key = `${prepSegment.ship}|${prepSegment.durationType}`;
-      remainingPrepByShipDuration.set(key, (remainingPrepByShipDuration.get(key) || 0) + prepSegment.launches);
-    }
-
-    missionSegments = rawMissionSegments
-      .map((segment) => {
-        const key = `${segment.ship}|${segment.durationType}`;
-        const prepRemaining = remainingPrepByShipDuration.get(key) || 0;
-        if (prepRemaining <= 0) {
-          return segment;
-        }
-        const reduction = Math.min(prepRemaining, segment.launches);
-        if (reduction <= 0) {
-          return segment;
-        }
-        remainingPrepByShipDuration.set(key, prepRemaining - reduction);
-        const launches = segment.launches - reduction;
-        if (launches <= 0) {
-          return null;
-        }
-        return {
-          ...segment,
-          launches,
-          totalSlotSeconds: launches * segment.durationSeconds,
-        };
-      })
-      .filter((segment): segment is TimelineSegment => segment !== null);
+  const remainingPrepByShipDuration = new Map<string, number>();
+  for (const prepSegment of prepSegments) {
+    const key = `${prepSegment.ship}|${prepSegment.durationType}`;
+    remainingPrepByShipDuration.set(key, (remainingPrepByShipDuration.get(key) || 0) + prepSegment.launches);
   }
+
+  const missionSegments: TimelineSegment[] = rawMissionSegments
+    .map((segment) => {
+      const key = `${segment.ship}|${segment.durationType}`;
+      const prepRemaining = remainingPrepByShipDuration.get(key) || 0;
+      if (prepRemaining <= 0) {
+        return segment;
+      }
+      const reduction = Math.min(prepRemaining, segment.launches);
+      if (reduction <= 0) {
+        return segment;
+      }
+      remainingPrepByShipDuration.set(key, prepRemaining - reduction);
+      const launches = segment.launches - reduction;
+      if (launches <= 0) {
+        return null;
+      }
+      return {
+        ...segment,
+        launches,
+        totalSlotSeconds: launches * segment.durationSeconds,
+      };
+    })
+    .filter((segment): segment is TimelineSegment => segment !== null);
 
   const missionSlotSeconds = missionSegments.reduce((sum, segment) => sum + segment.totalSlotSeconds, 0);
   const prepSlotSeconds = prepSegments.reduce((sum, segment) => sum + segment.totalSlotSeconds, 0);
@@ -833,7 +817,6 @@ function profileUrl(eid: string, filters: PlannerSourceFilters): string {
     includeInventoryRare: filters.includeInventoryRare ? "1" : "0",
     includeInventoryEpic: filters.includeInventoryEpic ? "1" : "0",
     includeInventoryLegendary: filters.includeInventoryLegendary ? "1" : "0",
-    includeInventoryFragments: filters.includeInventoryFragments ? "1" : "0",
   });
   return `/api/profile?${params.toString()}`;
 }
@@ -951,15 +934,12 @@ function ShipSelectorImage({ ship, imageFiles }: { ship: string; imageFiles: str
 
 export default function MissionCraftPlannerPage() {
   const [eid, setEid] = useState("");
-  const [planMode, setPlanMode] = useState<PlannerMode>("artifact");
   const [targetItemId, setTargetItemId] = useState("soul-stone-2");
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
   const [targetFilter, setTargetFilter] = useState("");
   const [targetActiveIndex, setTargetActiveIndex] = useState(0);
   const [quantity, setQuantity] = useState(1);
   const [quantityInput, setQuantityInput] = useState("1");
-  const [horizonDays, setHorizonDays] = useState(7);
-  const [horizonDaysInput, setHorizonDaysInput] = useState("7");
   const [targetCraftedOnly, setTargetCraftedOnly] = useState(false);
   const [priorityTimePct, setPriorityTimePct] = useState(50);
   const [inventorySource, setInventorySource] = useState<InventorySource>("main");
@@ -967,11 +947,9 @@ export default function MissionCraftPlannerPage() {
   const [includeInventoryRare, setIncludeInventoryRare] = useState(false);
   const [includeInventoryEpic, setIncludeInventoryEpic] = useState(false);
   const [includeInventoryLegendary, setIncludeInventoryLegendary] = useState(false);
-  const [includeInventoryFragments, setIncludeInventoryFragments] = useState(true);
   const [includeDropRare, setIncludeDropRare] = useState(false);
   const [includeDropEpic, setIncludeDropEpic] = useState(false);
   const [includeDropLegendary, setIncludeDropLegendary] = useState(false);
-  const [includeDropFragments, setIncludeDropFragments] = useState(true);
   const [fastMode, setFastMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -1007,11 +985,9 @@ export default function MissionCraftPlannerPage() {
     includeInventoryRare,
     includeInventoryEpic,
     includeInventoryLegendary,
-    includeInventoryFragments,
     includeDropRare,
     includeDropEpic,
     includeDropLegendary,
-    includeDropFragments,
   };
 
   const shipSelectorSummary = useMemo(() => {
@@ -1116,13 +1092,10 @@ export default function MissionCraftPlannerPage() {
     }
 
     const recipeMap = recipes as Record<string, { ingredients: Record<string, number> } | null>;
-    const isXpPlan = response.plan.mode === "xp" || Boolean(response.plan.maxXp);
     const requiredByItemKey: Record<string, number> = {};
-    const targetKey = isXpPlan ? "" : itemIdToKey(response.plan.targetItemId);
+    const targetKey = itemIdToKey(response.plan.targetItemId);
     const planTargetCraftedOnly = Boolean(lastSolveRequest?.targetCraftedOnly);
-    if (!isXpPlan) {
-      requiredByItemKey[targetKey] = (requiredByItemKey[targetKey] || 0) + response.plan.quantity;
-    }
+    requiredByItemKey[targetKey] = (requiredByItemKey[targetKey] || 0) + response.plan.quantity;
     for (const craft of response.plan.crafts) {
       const craftKey = itemIdToKey(craft.itemId);
       const recipe = recipeMap[craftKey];
@@ -1158,9 +1131,7 @@ export default function MissionCraftPlannerPage() {
       usage.set(consumerKey, (usage.get(consumerKey) || 0) + safeQty);
       neededUsesByItemKey.set(itemKey, usage);
     };
-    if (!isXpPlan) {
-      addNeededUse(targetKey, "__plan_target__", response.plan.quantity);
-    }
+    addNeededUse(targetKey, "__plan_target__", response.plan.quantity);
     for (const craft of response.plan.crafts) {
       const craftKey = itemIdToKey(craft.itemId);
       const recipe = recipeMap[craftKey];
@@ -1193,9 +1164,7 @@ export default function MissionCraftPlannerPage() {
         }
         const have = profileSnapshot ? Math.max(0, profileSnapshot.inventory[itemKey] || 0) : null;
         const expectedMission =
-          !isXpPlan && planTargetCraftedOnly && itemKey === targetKey
-            ? 0
-            : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
+          planTargetCraftedOnly && itemKey === targetKey ? 0 : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
         let plannedCraftTooltip: string | null = null;
         if (plannedCraftCount > 0) {
           const recipe = recipeMap[itemKey];
@@ -1402,10 +1371,6 @@ export default function MissionCraftPlannerPage() {
       if (savedInventorySource === "main" || savedInventorySource === "virtue") {
         setInventorySource(savedInventorySource);
       }
-      const savedPlanMode = readFirstStoredString([LOCAL_PREF_KEYS.plannerMode]);
-      if (savedPlanMode === "artifact" || savedPlanMode === "xp") {
-        setPlanMode(savedPlanMode);
-      }
       const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
       if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
         setTargetItemId(savedTarget);
@@ -1414,12 +1379,6 @@ export default function MissionCraftPlannerPage() {
       if (savedQuantity != null) {
         setQuantity(savedQuantity);
         setQuantityInput(String(savedQuantity));
-      }
-      const savedHorizonDaysRaw = readFirstStoredString([LOCAL_PREF_KEYS.plannerHorizonDays]);
-      const savedHorizonDays = savedHorizonDaysRaw == null ? null : Number(savedHorizonDaysRaw);
-      if (savedHorizonDays != null && Number.isFinite(savedHorizonDays) && savedHorizonDays >= 0.01 && savedHorizonDays <= 10) {
-        setHorizonDays(savedHorizonDays);
-        setHorizonDaysInput(String(savedHorizonDays));
       }
       const savedTargetCraftedOnly = readStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly]);
       if (savedTargetCraftedOnly != null) {
@@ -1445,10 +1404,6 @@ export default function MissionCraftPlannerPage() {
       if (savedIncludeInventoryLegendary != null) {
         setIncludeInventoryLegendary(savedIncludeInventoryLegendary);
       }
-      const savedIncludeInventoryFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments]);
-      if (savedIncludeInventoryFragments != null) {
-        setIncludeInventoryFragments(savedIncludeInventoryFragments);
-      }
       const savedIncludeDropRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare]);
       if (savedIncludeDropRare != null) {
         setIncludeDropRare(savedIncludeDropRare);
@@ -1460,10 +1415,6 @@ export default function MissionCraftPlannerPage() {
       const savedIncludeDropLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary]);
       if (savedIncludeDropLegendary != null) {
         setIncludeDropLegendary(savedIncludeDropLegendary);
-      }
-      const savedIncludeDropFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments]);
-      if (savedIncludeDropFragments != null) {
-        setIncludeDropFragments(savedIncludeDropFragments);
       }
       const savedDemoNoticeDismissed = readStoredBoolean([LOCAL_PREF_KEYS.plannerDemoNoticeDismissed]);
       if (savedDemoNoticeDismissed != null) {
@@ -1559,17 +1510,6 @@ export default function MissionCraftPlannerPage() {
       return;
     }
     try {
-      writeStoredString([LOCAL_PREF_KEYS.plannerMode], planMode);
-    } catch {
-      // Ignore localStorage persistence errors.
-    }
-  }, [planMode, prefsLoaded]);
-
-  useEffect(() => {
-    if (!prefsLoaded) {
-      return;
-    }
-    try {
       writeStoredString(SHARED_EID_KEYS, eid.trim());
     } catch {
       // Ignore localStorage persistence errors.
@@ -1608,17 +1548,6 @@ export default function MissionCraftPlannerPage() {
       // Ignore localStorage persistence errors.
     }
   }, [quantity, prefsLoaded]);
-
-  useEffect(() => {
-    if (!prefsLoaded) {
-      return;
-    }
-    try {
-      writeStoredString([LOCAL_PREF_KEYS.plannerHorizonDays], String(horizonDays));
-    } catch {
-      // Ignore localStorage persistence errors.
-    }
-  }, [horizonDays, prefsLoaded]);
 
   useEffect(() => {
     if (!prefsLoaded) {
@@ -1691,17 +1620,6 @@ export default function MissionCraftPlannerPage() {
       return;
     }
     try {
-      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments], includeInventoryFragments);
-    } catch {
-      // Ignore localStorage persistence errors.
-    }
-  }, [includeInventoryFragments, prefsLoaded]);
-
-  useEffect(() => {
-    if (!prefsLoaded) {
-      return;
-    }
-    try {
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare], includeDropRare);
     } catch {
       // Ignore localStorage persistence errors.
@@ -1735,17 +1653,6 @@ export default function MissionCraftPlannerPage() {
       return;
     }
     try {
-      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments], includeDropFragments);
-    } catch {
-      // Ignore localStorage persistence errors.
-    }
-  }, [includeDropFragments, prefsLoaded]);
-
-  useEffect(() => {
-    if (!prefsLoaded) {
-      return;
-    }
-    try {
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerDemoNoticeDismissed], demoNoticeDismissed);
     } catch {
       // Ignore localStorage persistence errors.
@@ -1765,15 +1672,12 @@ export default function MissionCraftPlannerPage() {
 
   async function runBuildPlan() {
     const normalizedQuantity = Math.max(1, Math.min(9999, Math.round(Number(quantityInput) || quantity || 1)));
-    const normalizedHorizonDays = Math.max(0.01, Math.min(10, Number(horizonDaysInput) || horizonDays || 1));
     const allowedShipDurationsForSolve = shipSelectorSummary.allSelected
       ? undefined
       : shipSelectorSummary.allowed.map((entry) => ({ ...entry }));
     const snapshotRequest: LastSolveInputs = {
-      planMode,
       targetItemId,
       quantity: normalizedQuantity,
-      horizonDays: normalizedHorizonDays,
       targetCraftedOnly,
       priorityTime: priorityTimePct / 100,
       fastMode,
@@ -1782,8 +1686,6 @@ export default function MissionCraftPlannerPage() {
     };
     setQuantity(normalizedQuantity);
     setQuantityInput(String(normalizedQuantity));
-    setHorizonDays(normalizedHorizonDays);
-    setHorizonDaysInput(String(normalizedHorizonDays));
 
     setError(null);
     setRefreshSummary(null);
@@ -1803,21 +1705,17 @@ export default function MissionCraftPlannerPage() {
       writeStoredString(SHARED_EID_KEYS, trimmedEid);
       writeStoredString([LOCAL_PREF_KEYS.plannerInventorySource], inventorySource);
       writeStoredBoolean(SHARED_INCLUDE_SLOTTED_KEYS, includeSlotted);
-      writeStoredString([LOCAL_PREF_KEYS.plannerMode], planMode);
       writeStoredString([LOCAL_PREF_KEYS.plannerTargetItemId], targetItemId);
       writeStoredString([LOCAL_PREF_KEYS.plannerQuantity], String(normalizedQuantity));
-      writeStoredString([LOCAL_PREF_KEYS.plannerHorizonDays], String(normalizedHorizonDays));
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly], targetCraftedOnly);
       writeStoredString([LOCAL_PREF_KEYS.plannerPriorityTimePct], String(priorityTimePct));
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerFastMode], fastMode);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryRare], includeInventoryRare);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryEpic], includeInventoryEpic);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryLegendary], includeInventoryLegendary);
-      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments], includeInventoryFragments);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare], includeDropRare);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropEpic], includeDropEpic);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary], includeDropLegendary);
-      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments], includeDropFragments);
 
       const canSolveClientSide = highsRef.current.ready && lootDataRef.current != null;
 
@@ -1848,51 +1746,39 @@ export default function MissionCraftPlannerPage() {
           etaMs: null,
         });
 
-        const clientProgress = (progress: PlannerProgressEvent) => {
-          setPlannerProgress({
-            phase: progress.phase,
-            message: progress.message,
-            elapsedMs: Number.isFinite(progress.elapsedMs) ? Math.max(0, Math.round(progress.elapsedMs)) : 0,
-            completed: typeof progress.completed === "number" ? Math.max(0, Math.round(progress.completed)) : null,
-            total: typeof progress.total === "number" ? Math.max(0, Math.round(progress.total)) : null,
-            etaMs:
-              typeof progress.etaMs === "number"
-                ? Math.max(0, Math.round(progress.etaMs))
-                : progress.etaMs === null
-                  ? null
-                  : null,
-          });
-        };
-        const sharedPlannerOptions = {
-          fastMode,
-          missionDropRarities: {
-            rare: includeDropRare,
-            epic: includeDropEpic,
-            legendary: includeDropLegendary,
-            fragments: includeDropFragments,
-          },
-          allowedShipDurations: allowedShipDurationsForSolve,
-          solverFn: highsRef.current.solve,
-          lootData: lootDataRef.current!,
-          onProgress: clientProgress,
-        };
-        const result =
-          planMode === "xp"
-            ? await planForMaxXpHorizon(
-                profile as Parameters<typeof planForMaxXpHorizon>[0],
-                normalizedHorizonDays,
-                sharedPlannerOptions
-              )
-            : await planForTarget(
-                profile as Parameters<typeof planForTarget>[0],
-                targetItemId,
-                normalizedQuantity,
-                priorityTimePct / 100,
-                {
-                  ...sharedPlannerOptions,
-                  targetCraftedOnly,
-                }
-              );
+        const result = await planForTarget(
+          profile as Parameters<typeof planForTarget>[0],
+          targetItemId,
+          normalizedQuantity,
+          priorityTimePct / 100,
+          {
+            fastMode,
+            missionDropRarities: {
+              rare: includeDropRare,
+              epic: includeDropEpic,
+              legendary: includeDropLegendary,
+            },
+            targetCraftedOnly,
+            allowedShipDurations: allowedShipDurationsForSolve,
+            solverFn: highsRef.current.solve,
+            lootData: lootDataRef.current!,
+            onProgress: (progress: PlannerProgressEvent) => {
+              setPlannerProgress({
+                phase: progress.phase,
+                message: progress.message,
+                elapsedMs: Number.isFinite(progress.elapsedMs) ? Math.max(0, Math.round(progress.elapsedMs)) : 0,
+                completed: typeof progress.completed === "number" ? Math.max(0, Math.round(progress.completed)) : null,
+                total: typeof progress.total === "number" ? Math.max(0, Math.round(progress.total)) : null,
+                etaMs:
+                  typeof progress.etaMs === "number"
+                    ? Math.max(0, Math.round(progress.etaMs))
+                    : progress.etaMs === null
+                      ? null
+                      : null,
+              });
+            },
+          }
+        );
 
         const planResponse: PlanResponse = {
           profile: {
@@ -1910,21 +1796,17 @@ export default function MissionCraftPlannerPage() {
         // Server-side fallback: stream from /api/plan/stream.
         const requestPayload = {
           eid: trimmedEid,
-          planMode,
           targetItemId,
           quantity: normalizedQuantity,
           priorityTime: priorityTimePct / 100,
-          horizonDays: normalizedHorizonDays,
           inventorySource,
           includeSlotted,
           includeInventoryRare,
           includeInventoryEpic,
           includeInventoryLegendary,
-          includeInventoryFragments,
           includeDropRare,
           includeDropEpic,
           includeDropLegendary,
-          includeDropFragments,
           targetCraftedOnly,
           fastMode,
           allowedShipDurations: allowedShipDurationsForSolve,
@@ -2050,10 +1932,6 @@ export default function MissionCraftPlannerPage() {
     if (!response) {
       return;
     }
-    if (planMode === "xp" || response.plan.mode === "xp") {
-      setError("Live refresh for XP/time mode is not wired yet. Build a fresh XP/time plan after ship returns.");
-      return;
-    }
     if (isDemoMode) {
       setError("Live refresh is unavailable in demo mode. Enter your EID to replan from your account data.");
       return;
@@ -2089,7 +1967,6 @@ export default function MissionCraftPlannerPage() {
           includeDropRare,
           includeDropEpic,
           includeDropLegendary,
-          includeDropFragments,
           allowedShipDurations: allowedShipDurationsForReplan,
           observedReturns: [],
           missionLaunches: [],
@@ -2110,10 +1987,8 @@ export default function MissionCraftPlannerPage() {
       setResponse(data);
       setProfileSnapshot(liveProfile);
       setLastSolveRequest({
-        planMode: "artifact",
         targetItemId,
         quantity: normalizedQuantity,
-        horizonDays,
         priorityTime: priorityTimePct / 100,
         targetCraftedOnly,
         fastMode,
@@ -2241,10 +2116,8 @@ export default function MissionCraftPlannerPage() {
       kind: "mission-craft-planner-solve-input",
       capturedAt: new Date().toISOString(),
       request: {
-        planMode: lastSolveRequest.planMode,
         targetItemId: lastSolveRequest.targetItemId,
         quantity: lastSolveRequest.quantity,
-        horizonDays: lastSolveRequest.horizonDays,
         targetCraftedOnly: lastSolveRequest.targetCraftedOnly,
         priorityTime: lastSolveRequest.priorityTime,
         fastMode: lastSolveRequest.fastMode,
@@ -2286,9 +2159,6 @@ export default function MissionCraftPlannerPage() {
     if (!profileSnapshot || !response || compareSelected.size === 0) {
       return;
     }
-    if (response.plan.mode === "xp") {
-      return;
-    }
     setCompareLoading(true);
     setCompareError(null);
     setCompareResults(null);
@@ -2310,7 +2180,6 @@ export default function MissionCraftPlannerPage() {
             rare: sourceFilters.includeDropRare,
             epic: sourceFilters.includeDropEpic,
             legendary: sourceFilters.includeDropLegendary,
-            fragments: sourceFilters.includeDropFragments,
           },
           solverFn: highsRef.current.solve,
           lootData: lootDataRef.current!,
@@ -2327,7 +2196,6 @@ export default function MissionCraftPlannerPage() {
           includeDropRare: sourceFilters.includeDropRare,
           includeDropEpic: sourceFilters.includeDropEpic,
           includeDropLegendary: sourceFilters.includeDropLegendary,
-          includeDropFragments: sourceFilters.includeDropFragments,
         };
         const res = await fetch("/api/plan/compare", {
           method: "POST",
@@ -2419,27 +2287,6 @@ export default function MissionCraftPlannerPage() {
             </div>
           </div>
 
-          <div className="field" style={{ minWidth: 220 }}>
-            <label>Plan mode</label>
-            <div className={styles.modeToggle} role="group" aria-label="Plan mode">
-              <button
-                type="button"
-                data-active={planMode === "artifact" ? "1" : "0"}
-                onClick={() => setPlanMode("artifact")}
-              >
-                Artifact
-              </button>
-              <button
-                type="button"
-                data-active={planMode === "xp" ? "1" : "0"}
-                onClick={() => setPlanMode("xp")}
-              >
-                XP / time
-              </button>
-            </div>
-          </div>
-
-          {planMode === "artifact" ? (
           <div className="field" style={{ minWidth: 280, flex: 2 }} ref={targetPickerRef}>
             <label htmlFor="targetItemFilter">Target artifact/stone</label>
             <div className={styles.targetPicker}>
@@ -2528,42 +2375,7 @@ export default function MissionCraftPlannerPage() {
               )}
             </div>
           </div>
-          ) : (
-          <div className="field" style={{ minWidth: 160 }}>
-            <label htmlFor="horizonDays">Days</label>
-            <input
-              id="horizonDays"
-              type="number"
-              min={1}
-              max={10}
-              step={1}
-              value={horizonDaysInput}
-              onChange={(event) => {
-                const nextRaw = event.target.value;
-                setHorizonDaysInput(nextRaw);
-                const parsed = Number(nextRaw);
-                if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 10) {
-                  setHorizonDays(Math.round(parsed));
-                }
-              }}
-              onBlur={() => {
-                if (horizonDaysInput.trim() === "") {
-                  setHorizonDaysInput(String(horizonDays));
-                  return;
-                }
-                const parsed = Number(horizonDaysInput);
-                const nextDays = Number.isFinite(parsed) ? Math.max(1, Math.min(10, Math.round(parsed))) : horizonDays;
-                setHorizonDays(nextDays);
-                setHorizonDaysInput(String(nextDays));
-              }}
-            />
-            <div className="muted" style={{ fontSize: 12 }}>
-              Optimizes expected craft XP after launches that fit in this horizon.
-            </div>
-          </div>
-          )}
 
-          {planMode === "artifact" && (
           <div className="field" style={{ minWidth: 120 }}>
             <label htmlFor="quantity">Quantity</label>
             <input
@@ -2612,7 +2424,6 @@ export default function MissionCraftPlannerPage() {
               </span>
             </label>
           </div>
-          )}
         </div>
 
         {showDemoNotice && (
@@ -2641,7 +2452,7 @@ export default function MissionCraftPlannerPage() {
 
         <div className="row" style={{ marginTop: 20, alignItems: "stretch" }}>
 
-          <div className={`field ${styles.sourceMatrixField}`} style={{ minWidth: 420, flex: 1 }}>
+          <div className={`field ${styles.sourceMatrixField}`} style={{ minWidth: 340, flex: 1 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: 16 }}>
               <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
                 <label>Ingredient sources</label>
@@ -2677,9 +2488,6 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixHeader} title="Slotted stones">
                 Slotted
               </span>
-              <span className={styles.matrixHeader} title="Stone fragments">
-                Fragments
-              </span>
 
               <span className={styles.matrixRowLabel}>Inventory</span>
               <span className={styles.matrixCell}>
@@ -2706,9 +2514,6 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeSlotted, setIncludeSlotted, "Inventory slotted stones")}
               </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeInventoryFragments, setIncludeInventoryFragments, "Inventory stone fragments")}
-              </span>
 
               <span className={styles.matrixRowLabel}>Dropped</span>
               <span className={styles.matrixCell}>
@@ -2720,9 +2525,7 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeDropLegendary, setIncludeDropLegendary, "Dropped legendary shiny artifacts")}
               </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}
-              </span>
+              <span className={`${styles.matrixCell} ${styles.matrixCellMuted}`}>n/a</span>
             </div>
           </div>
 
@@ -2731,19 +2534,17 @@ export default function MissionCraftPlannerPage() {
               <button type="submit" disabled={loading}>
                 {loading ? "Planning..." : "Build plan"}
               </button>
-              {planMode === "artifact" && (
-                <div className="field" style={{ minWidth: 340, flex: 1 }}>
-                  <label htmlFor="priority">Optimization priority ({priorityTimePct}% time / {100 - priorityTimePct}% GE)</label>
-                  <input
-                    id="priority"
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={priorityTimePct}
-                    onChange={(event) => setPriorityTimePct(Number(event.target.value))}
-                  />
-                </div>
-              )}
+              <div className="field" style={{ minWidth: 340, flex: 1 }}>
+                <label htmlFor="priority">Optimization priority ({priorityTimePct}% time / {100 - priorityTimePct}% GE)</label>
+                <input
+                  id="priority"
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={priorityTimePct}
+                  onChange={(event) => setPriorityTimePct(Number(event.target.value))}
+                />
+              </div>
 
               <label className={styles.fastModeToggle} htmlFor="fastMode">
                 <input
@@ -2755,11 +2556,7 @@ export default function MissionCraftPlannerPage() {
                 <span className="muted">Faster, less optimal solve</span>
               </label>
             </div>
-            <button
-              type="button"
-              disabled={loading || refreshing || !response || isDemoMode || planMode === "xp" || response?.plan.mode === "xp"}
-              onClick={onRefreshFromLive}
-            >
+            <button type="button" disabled={loading || refreshing || !response || isDemoMode} onClick={onRefreshFromLive}>
               {refreshing ? "Replanning..." : "Replan after ship returns"}
             </button>
           </div>
@@ -2912,16 +2709,9 @@ export default function MissionCraftPlannerPage() {
               </div>
             </div>
             <div className="card">
-              <div className="muted">{response.plan.mode === "xp" ? "Max XP craft cost" : "Estimated GE craft cost"}</div>
+              <div className="muted">Estimated GE craft cost</div>
               <div className="kpi">{Math.round(response.plan.geCost).toLocaleString()}</div>
             </div>
-            {response.plan.maxXp && (
-              <div className="card">
-                <div className="muted">Total expected XP available</div>
-                <div className="kpi">{Math.round(response.plan.maxXp.totalXp).toLocaleString()}</div>
-                <div className="muted">{response.plan.horizonDays?.toLocaleString()} day XP/time horizon</div>
-              </div>
-            )}
             <div className="card">
               <div className="muted">Research levels</div>
               <div>FTL: <strong>{response.profile.epicResearchFTLLevel}</strong></div>
@@ -2930,7 +2720,7 @@ export default function MissionCraftPlannerPage() {
           </div>
 
           <div className="panel">
-            <h2 style={{ marginTop: 0 }}>{response.plan.mode === "xp" ? "Max XP craft plan" : "Craft plan"}</h2>
+            <h2 style={{ marginTop: 0 }}>Craft plan</h2>
             {craftPlanDetailRows.length === 0 ? (
               <p className="muted" style={{ margin: 0 }}>No crafting needed.</p>
             ) : (
@@ -3240,7 +3030,7 @@ export default function MissionCraftPlannerPage() {
             )}
           </div>
 
-          {response.plan.mode !== "xp" && response.plan.availableCombos.length > 0 && (
+          {response.plan.availableCombos.length > 0 && (
             <div className="panel">
               <div className={styles.compareHeader}>
                 <button

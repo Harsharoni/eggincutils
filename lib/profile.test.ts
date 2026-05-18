@@ -143,32 +143,6 @@ describe("parseInventory", () => {
     expect(inventory.tachyon_stone_3).toBeUndefined();
     expect(inventory.puzzle_cube_3).toBe(3);
   });
-
-  it("can exclude stone fragments from inventory and slotted stones", () => {
-    const items = [
-      {
-        artifact: {
-          spec: { name: "SOUL_STONE_FRAGMENT", level: "INFERIOR" },
-          stones: [{ name: "TACHYON_STONE_FRAGMENT", level: "INFERIOR" }],
-        },
-        quantity: 2,
-      },
-      {
-        artifact: {
-          spec: { name: "PUZZLE_CUBE", level: "NORMAL" },
-          stones: [{ name: "TERRA_STONE", level: "INFERIOR" }],
-        },
-        quantity: 3,
-      },
-    ];
-
-    const inventory = parseInventory(items, true, true, false);
-
-    expect(inventory.soul_stone_1).toBeUndefined();
-    expect(inventory.tachyon_stone_1).toBeUndefined();
-    expect(inventory.puzzle_cube_3).toBe(3);
-    expect(inventory.terra_stone_2).toBe(3);
-  });
 });
 
 describe("parseCraftCounts and parseMissions", () => {

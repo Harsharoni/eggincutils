@@ -2,7 +2,7 @@ import { formatZodIssues, planApiResponseSchema, planRequestSchema, playerProfil
 import { createDemoProfile, isBlankEid } from "../../../../lib/demo-profile";
 import { LootDataError } from "../../../../lib/loot-data";
 import { getPlayerProfile } from "../../../../lib/profile";
-import { MissionCoverageError, planForMaxXpHorizon, planForTarget, type PlannerProgressEvent } from "../../../../lib/planner";
+import { MissionCoverageError, planForTarget, type PlannerProgressEvent } from "../../../../lib/planner";
 
 export const runtime = "nodejs";
 
@@ -123,7 +123,6 @@ export async function POST(request: Request): Promise<Response> {
                   epic: parsedPayload.data.includeInventoryEpic,
                   legendary: parsedPayload.data.includeInventoryLegendary,
                 },
-                includeStoneFragments: parsedPayload.data.includeInventoryFragments,
               });
           const validatedProfile = playerProfileSchema.safeParse(profile);
           if (!validatedProfile.success) {
@@ -141,35 +140,28 @@ export async function POST(request: Request): Promise<Response> {
             message: "Profile loaded. Starting planner solve...",
           });
           const solveElapsedOffsetMs = Date.now() - streamStartedAtMs;
-          const sharedPlannerOptions = {
-            fastMode: parsedPayload.data.fastMode,
-            missionDropRarities: {
-              rare: parsedPayload.data.includeDropRare,
-              epic: parsedPayload.data.includeDropEpic,
-              legendary: parsedPayload.data.includeDropLegendary,
-              fragments: parsedPayload.data.includeDropFragments,
-            },
-            allowedShipDurations: parsedPayload.data.allowedShipDurations,
-            onProgress: (progress: PlannerProgressEvent) => {
-              emitProgress({
-                ...progress,
-                elapsedMs: solveElapsedOffsetMs + Math.max(0, Math.round(progress.elapsedMs)),
-              });
-            },
-          };
-          const result =
-            parsedPayload.data.planMode === "xp"
-              ? await planForMaxXpHorizon(validatedProfile.data, parsedPayload.data.horizonDays, sharedPlannerOptions)
-              : await planForTarget(
-                  validatedProfile.data,
-                  parsedPayload.data.targetItemId,
-                  parsedPayload.data.quantity,
-                  parsedPayload.data.priorityTime,
-                  {
-                    ...sharedPlannerOptions,
-                    targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
-                  }
-                );
+          const result = await planForTarget(
+            validatedProfile.data,
+            parsedPayload.data.targetItemId,
+            parsedPayload.data.quantity,
+            parsedPayload.data.priorityTime,
+            {
+              fastMode: parsedPayload.data.fastMode,
+              missionDropRarities: {
+                rare: parsedPayload.data.includeDropRare,
+                epic: parsedPayload.data.includeDropEpic,
+                legendary: parsedPayload.data.includeDropLegendary,
+              },
+              targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
+              allowedShipDurations: parsedPayload.data.allowedShipDurations,
+              onProgress: (progress) => {
+                emitProgress({
+                  ...progress,
+                  elapsedMs: solveElapsedOffsetMs + Math.max(0, Math.round(progress.elapsedMs)),
+                });
+              },
+            }
+          );
 
           const responsePayload = {
             profile: {

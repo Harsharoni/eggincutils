@@ -1,6 +1,6 @@
 import type { LootJson, MissionLevelLootStore, MissionTargetLootStore } from "./loot-data";
 import type { HighsSolveResult } from "./highs";
-import { isStoneFragmentKey, isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
+import { isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
 import { getRecipe, recipes } from "./recipes";
 import {
   buildMissionOptions,
@@ -85,7 +85,6 @@ type ShinyRaritySelection = {
   rare: boolean;
   epic: boolean;
   legendary: boolean;
-  fragments: boolean;
 };
 
 export type AvailableCombo = {
@@ -95,7 +94,6 @@ export type AvailableCombo = {
 };
 
 export type PlannerResult = {
-  mode?: "artifact" | "xp";
   targetItemId: string;
   quantity: number;
   priorityTime: number;
@@ -114,13 +112,6 @@ export type PlannerResult = {
   };
   notes: string[];
   availableCombos: AvailableCombo[];
-  horizonDays?: number;
-  maxXp?: {
-    totalXp: number;
-    totalGeCost: number;
-    remainingInventory: Record<string, number>;
-    finalCraftCounts: Record<string, number>;
-  };
 };
 
 export type SolverFunction = (
@@ -201,7 +192,6 @@ const DEFAULT_INCLUDE_SHINY_RARITIES: ShinyRaritySelection = {
   rare: true,
   epic: true,
   legendary: true,
-  fragments: true,
 };
 
 class LruCache<K, V> {
@@ -264,7 +254,6 @@ function normalizeShinyRaritySelection(raw?: Partial<ShinyRaritySelection>): Shi
     rare: raw.rare !== false,
     epic: raw.epic !== false,
     legendary: raw.legendary !== false,
-    fragments: raw.fragments !== false,
   };
 }
 
@@ -280,12 +269,9 @@ function missionDropRarityNote(selection: ShinyRaritySelection): string {
     shinyTiers.push("Legendary");
   }
   if (shinyTiers.length === 0) {
-    return selection.fragments
-      ? "Mission drops include common rarity only (R/E/L disabled by planner settings)."
-      : "Mission drops include common rarity only; stone fragments are excluded.";
+    return "Mission drops include common rarity only (R/E/L disabled by planner settings).";
   }
-  const fragmentText = selection.fragments ? "" : "; stone fragments excluded";
-  return `Mission drops include common + ${shinyTiers.join(" + ")} rarities${fragmentText} (per planner settings).`;
+  return `Mission drops include common + ${shinyTiers.join(" + ")} rarities (per planner settings).`;
 }
 
 function getDiscountedCost(baseCost: number, craftCount: number): number {
@@ -541,9 +527,6 @@ function yieldsFromTarget(
   for (const item of target.items) {
     const itemKey = itemIdToKey(item.itemId);
     if (!items.has(itemKey)) {
-      continue;
-    }
-    if (!includeShinyRarities.fragments && isStoneFragmentKey(itemKey)) {
       continue;
     }
     const common = item.counts[0] || 0;
@@ -952,17 +935,6 @@ type UnifiedSolveMetrics = {
   binaryVarCount: number;
   integerVarCount: number;
   constraintCount: number;
-};
-
-type MaxXpHorizonSolve = {
-  crafts: Record<string, number>;
-  missionCounts: Record<string, number>;
-  totalXp: number;
-  geCost: number;
-  totalSlotSeconds: number;
-  remainingInventory: Record<string, number>;
-  finalCraftCounts: Record<string, number>;
-  status: string;
 };
 
 function formatLinearExpression(terms: Array<{ coefficient: number; variable: string }>): string {
@@ -1555,373 +1527,6 @@ async function solveUnifiedCraftMissionPlan(options: {
   };
 }
 
-function collectAllCraftPlanningItems(): Set<string> {
-  const items = new Set<string>();
-  for (const [itemKey, recipe] of Object.entries(recipes)) {
-    items.add(itemKey);
-    if (!recipe) {
-      continue;
-    }
-    for (const ingredientKey of Object.keys(recipe.ingredients)) {
-      items.add(ingredientKey);
-    }
-  }
-  return items;
-}
-
-function getMaxXpHorizonProblem(options: {
-  profile: PlayerProfile;
-  actions: MissionAction[];
-  horizonSlotSeconds: number;
-  maxMissionLaunchesByOption?: Record<string, number>;
-  phasedChainConstraints?: PhasedChainConstraint[];
-}): {
-  model: string;
-  craftKeys: string[];
-  craftVars: string[];
-  missionVars: string[];
-} {
-  const {
-    profile,
-    actions,
-    horizonSlotSeconds,
-    maxMissionLaunchesByOption = {},
-    phasedChainConstraints = [],
-  } = options;
-  const itemKeys = Array.from(collectAllCraftPlanningItems()).sort();
-  const craftKeys = Object.keys(recipes)
-    .filter((itemKey) => Boolean(recipes[itemKey]))
-    .sort();
-  const craftVars = craftKeys.map((_, index) => `c_${index}`);
-  const missionVars = actions.map((_, index) => `m_${index}`);
-  const missionLaneVars = actions.map((_, actionIndex) => [0, 1, 2].map((laneIndex) => `ml_${actionIndex}_${laneIndex}`));
-  const inventoryBudget = Object.values(profile.inventory).reduce((sum, quantity) => sum + Math.max(0, quantity || 0), 0);
-  const bestDropRate = actions.reduce((best, action) => {
-    const expectedDrops = Object.values(action.yields).reduce((sum, quantity) => sum + Math.max(0, quantity || 0), 0);
-    if (action.durationSeconds <= 0) {
-      return best;
-    }
-    return Math.max(best, expectedDrops / action.durationSeconds);
-  }, 0);
-  const craftUpperBound = Math.max(
-    1,
-    Math.ceil(inventoryBudget + Math.max(0, horizonSlotSeconds) * bestDropRate)
-  );
-
-  const lines: string[] = [];
-  lines.push("Maximize");
-  const objectiveTerms: Array<{ coefficient: number; variable: string }> = [];
-  for (let index = 0; index < craftKeys.length; index += 1) {
-    const recipe = recipes[craftKeys[index]];
-    if (!recipe || recipe.xp <= 0) {
-      continue;
-    }
-    objectiveTerms.push({ coefficient: recipe.xp, variable: craftVars[index] });
-  }
-  for (let index = 0; index < actions.length; index += 1) {
-    objectiveTerms.push({ coefficient: -actions[index].durationSeconds * 1e-10, variable: missionVars[index] });
-  }
-  lines.push(`  obj: ${formatLinearExpression(objectiveTerms)}`);
-
-  lines.push("Subject To");
-  const craftVarByKey = new Map(craftKeys.map((itemKey, index) => [itemKey, craftVars[index]]));
-  for (let itemIndex = 0; itemIndex < itemKeys.length; itemIndex += 1) {
-    const itemKey = itemKeys[itemIndex];
-    const terms: Array<{ coefficient: number; variable: string }> = [];
-    const outputVar = craftVarByKey.get(itemKey);
-    if (outputVar) {
-      terms.push({ coefficient: 1, variable: outputVar });
-    }
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const yieldPerMission = actions[actionIndex].yields[itemKey] || 0;
-      if (yieldPerMission > SCORE_EPS) {
-        terms.push({ coefficient: yieldPerMission, variable: missionVars[actionIndex] });
-      }
-    }
-    for (let craftIndex = 0; craftIndex < craftKeys.length; craftIndex += 1) {
-      const recipe = recipes[craftKeys[craftIndex]];
-      const ingredientQty = recipe?.ingredients[itemKey] || 0;
-      if (ingredientQty > 0) {
-        terms.push({ coefficient: -ingredientQty, variable: craftVars[craftIndex] });
-      }
-    }
-    const inventoryQty = Math.max(0, profile.inventory[itemKey] || 0);
-    lines.push(`  b_${itemIndex}: ${formatLinearExpression(terms)} >= ${formatLpNumber(-inventoryQty)}`);
-  }
-
-  const phasedBinaryVars: string[] = [];
-  if (missionVars.length > 0) {
-    const actionIndexesByOption = new Map<string, number[]>();
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const optionKey = actions[actionIndex].optionKey;
-      const existing = actionIndexesByOption.get(optionKey) || [];
-      existing.push(actionIndex);
-      actionIndexesByOption.set(optionKey, existing);
-    }
-
-    let optionMaxConstraintIndex = 0;
-    for (const [optionKey, launchCapRaw] of Object.entries(maxMissionLaunchesByOption)) {
-      const launchCap = Math.max(0, Math.round(launchCapRaw));
-      if (launchCap <= 0) {
-        continue;
-      }
-      const actionIndexes = actionIndexesByOption.get(optionKey) || [];
-      if (actionIndexes.length === 0) {
-        continue;
-      }
-      const terms = actionIndexes.map((index) => ({ coefficient: 1, variable: missionVars[index] }));
-      lines.push(`  mx_${optionMaxConstraintIndex}: ${formatLinearExpression(terms)} <= ${formatLpNumber(launchCap)}`);
-      optionMaxConstraintIndex += 1;
-    }
-
-    let phasedConstraintIndex = 0;
-    for (let chainIndex = 0; chainIndex < phasedChainConstraints.length; chainIndex += 1) {
-      const { chain, caps } = phasedChainConstraints[chainIndex];
-      if (chain.length <= 1) {
-        continue;
-      }
-      for (let phaseIndex = 1; phaseIndex < chain.length; phaseIndex += 1) {
-        const currentOptionKey = chain[phaseIndex];
-        const previousOptionKey = chain[phaseIndex - 1];
-        const currentIndexes = actionIndexesByOption.get(currentOptionKey) || [];
-        if (currentIndexes.length === 0) {
-          continue;
-        }
-        const previousIndexes = actionIndexesByOption.get(previousOptionKey) || [];
-        const zVar = `zp_${chainIndex}_${phaseIndex}`;
-        phasedBinaryVars.push(zVar);
-
-        const phaseCapRaw = caps[phaseIndex];
-        const optionCapRaw = maxMissionLaunchesByOption[currentOptionKey];
-        const activationCap = Math.max(
-          1,
-          Math.round(
-            (Number.isFinite(phaseCapRaw) && phaseCapRaw > 0)
-              ? phaseCapRaw
-              : (Number.isFinite(optionCapRaw) && optionCapRaw > 0)
-                ? optionCapRaw
-                : BINARY_BIG_M
-          )
-        );
-        const activationTerms = currentIndexes.map((idx) => ({ coefficient: 1, variable: missionVars[idx] }));
-        activationTerms.push({ coefficient: -activationCap, variable: zVar });
-        lines.push(`  pa_${phasedConstraintIndex}: ${formatLinearExpression(activationTerms)} <= 0`);
-        phasedConstraintIndex += 1;
-
-        const prevCap = caps[phaseIndex - 1];
-        if (prevCap > 0 && previousIndexes.length > 0) {
-          const completionTerms = previousIndexes.map((idx) => ({ coefficient: 1, variable: missionVars[idx] }));
-          completionTerms.push({ coefficient: -prevCap, variable: zVar });
-          lines.push(`  pb_${phasedConstraintIndex}: ${formatLinearExpression(completionTerms)} >= 0`);
-          phasedConstraintIndex += 1;
-        }
-      }
-    }
-
-    const slotTerms = actions.map((action, index) => ({ coefficient: action.durationSeconds, variable: missionVars[index] }));
-    lines.push(`  ts_0: ${formatLinearExpression(slotTerms)} <= ${formatLpNumber(Math.max(0, horizonSlotSeconds))}`);
-
-    const horizonWallSeconds = Math.max(0, Math.floor(horizonSlotSeconds / 3));
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const assignmentTerms: Array<{ coefficient: number; variable: string }> = [
-        { coefficient: 1, variable: missionVars[actionIndex] },
-      ];
-      for (const laneVar of missionLaneVars[actionIndex]) {
-        assignmentTerms.push({ coefficient: -1, variable: laneVar });
-      }
-      lines.push(`  ma_${actionIndex}: ${formatLinearExpression(assignmentTerms)} = 0`);
-    }
-    for (let laneIndex = 0; laneIndex < 3; laneIndex += 1) {
-      const laneTerms = actions.map((action, actionIndex) => ({
-        coefficient: action.durationSeconds,
-        variable: missionLaneVars[actionIndex][laneIndex],
-      }));
-      lines.push(`  lc_${laneIndex}: ${formatLinearExpression(laneTerms)} <= ${formatLpNumber(horizonWallSeconds)}`);
-    }
-
-    const actionIndexesByDuration = new Map<number, number[]>();
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const durationSeconds = Math.max(0, Math.round(actions[actionIndex].durationSeconds));
-      if (durationSeconds <= 0) {
-        continue;
-      }
-      const existing = actionIndexesByDuration.get(durationSeconds) || [];
-      existing.push(actionIndex);
-      actionIndexesByDuration.set(durationSeconds, existing);
-    }
-    let durationCapIndex = 0;
-    for (const [durationSeconds, actionIndexes] of actionIndexesByDuration.entries()) {
-      const maxLaunchesForDuration = 3 * Math.floor(horizonWallSeconds / durationSeconds);
-      const durationTerms = actionIndexes.map((actionIndex) => ({ coefficient: 1, variable: missionVars[actionIndex] }));
-      lines.push(
-        `  dc_${durationCapIndex}: ${formatLinearExpression(durationTerms)} <= ${formatLpNumber(maxLaunchesForDuration)}`
-      );
-      durationCapIndex += 1;
-    }
-  }
-
-  lines.push("Bounds");
-  for (const variable of craftVars) {
-    lines.push(`  0 <= ${variable} <= ${formatLpNumber(craftUpperBound)}`);
-  }
-  for (const variable of missionVars) {
-    lines.push(`  ${variable} >= 0`);
-  }
-  for (const laneVar of missionLaneVars.flat()) {
-    lines.push(`  ${laneVar} >= 0`);
-  }
-  for (const zVar of phasedBinaryVars) {
-    lines.push(`  0 <= ${zVar} <= 1`);
-  }
-
-  const integerVars = [...craftVars, ...missionVars, ...missionLaneVars.flat()];
-  if (integerVars.length > 0) {
-    lines.push("General");
-    const chunkSize = 24;
-    for (let index = 0; index < integerVars.length; index += chunkSize) {
-      lines.push(`  ${integerVars.slice(index, index + chunkSize).join(" ")}`);
-    }
-  }
-  if (phasedBinaryVars.length > 0) {
-    lines.push("Binary");
-    const chunkSize = 24;
-    for (let index = 0; index < phasedBinaryVars.length; index += chunkSize) {
-      lines.push(`  ${phasedBinaryVars.slice(index, index + chunkSize).join(" ")}`);
-    }
-  }
-  lines.push("End");
-
-  return {
-    model: lines.join("\n"),
-    craftKeys,
-    craftVars,
-    missionVars,
-  };
-}
-
-function computeRemainingInventoryAfterMaxXpHorizon(options: {
-  profile: PlayerProfile;
-  actions: MissionAction[];
-  missionCounts: Record<string, number>;
-  crafts: Record<string, number>;
-}): Record<string, number> {
-  const remaining: Record<string, number> = {};
-  for (const [itemKey, quantity] of Object.entries(options.profile.inventory)) {
-    if (quantity > 0) {
-      remaining[itemKey] = quantity;
-    }
-  }
-
-  const actionsByKey = new Map(options.actions.map((action) => [action.key, action]));
-  for (const [actionKey, launchesRaw] of Object.entries(options.missionCounts)) {
-    const launches = Math.max(0, Math.round(launchesRaw));
-    const action = actionsByKey.get(actionKey);
-    if (!action || launches <= 0) {
-      continue;
-    }
-    for (const [itemKey, yieldPerMission] of Object.entries(action.yields)) {
-      remaining[itemKey] = (remaining[itemKey] || 0) + yieldPerMission * launches;
-    }
-  }
-
-  for (const [craftKey, countRaw] of Object.entries(options.crafts)) {
-    const count = Math.max(0, Math.round(countRaw));
-    const recipe = recipes[craftKey];
-    if (!recipe || count <= 0) {
-      continue;
-    }
-    for (const [ingredientKey, ingredientQty] of Object.entries(recipe.ingredients)) {
-      remaining[ingredientKey] = (remaining[ingredientKey] || 0) - ingredientQty * count;
-    }
-    remaining[craftKey] = (remaining[craftKey] || 0) + count;
-  }
-
-  const normalized: Record<string, number> = {};
-  for (const [itemKey, quantity] of Object.entries(remaining)) {
-    const safeQuantity = Math.max(0, quantity);
-    if (safeQuantity > SCORE_EPS) {
-      normalized[itemKey] = safeQuantity;
-    }
-  }
-  return normalized;
-}
-
-async function solveMaxXpHorizon(options: {
-  profile: PlayerProfile;
-  actions: MissionAction[];
-  horizonSlotSeconds: number;
-  maxMissionLaunchesByOption?: Record<string, number>;
-  phasedChainConstraints?: PhasedChainConstraint[];
-  fastMode?: boolean;
-  solverFn?: SolverFunction;
-}): Promise<MaxXpHorizonSolve> {
-  const solve = options.solverFn ?? await getDefaultSolverFn();
-  const problem = getMaxXpHorizonProblem({
-    profile: options.profile,
-    actions: options.actions,
-    horizonSlotSeconds: options.horizonSlotSeconds,
-    maxMissionLaunchesByOption: options.maxMissionLaunchesByOption,
-    phasedChainConstraints: options.phasedChainConstraints,
-  });
-  const solution = await solve(problem.model, {
-    mip_rel_gap: options.fastMode ? 0.02 : 0.005,
-  });
-  const status = solution.Status || "Unknown";
-  if (status !== "Optimal") {
-    throw new Error(`max-XP horizon HiGHS solve status '${status}'`);
-  }
-
-  const crafts: Record<string, number> = {};
-  let totalXp = 0;
-  let geCost = 0;
-  const finalCraftCounts: Record<string, number> = { ...options.profile.craftCounts };
-  for (let index = 0; index < problem.craftKeys.length; index += 1) {
-    const rawValue = solution.Columns?.[problem.craftVars[index]]?.Primal || 0;
-    const count = Math.max(0, Math.round(rawValue));
-    if (count <= 0) {
-      continue;
-    }
-    const itemKey = problem.craftKeys[index];
-    const recipe = recipes[itemKey];
-    if (!recipe) {
-      continue;
-    }
-    crafts[itemKey] = count;
-    totalXp += count * recipe.xp;
-    geCost += getBatchDiscountedCost(recipe.cost, Math.max(0, options.profile.craftCounts[itemKey] || 0), count);
-    finalCraftCounts[itemKey] = Math.max(0, finalCraftCounts[itemKey] || 0) + count;
-  }
-
-  const missionCounts: Record<string, number> = {};
-  let totalSlotSeconds = 0;
-  for (let index = 0; index < options.actions.length; index += 1) {
-    const rawValue = solution.Columns?.[problem.missionVars[index]]?.Primal || 0;
-    const launches = Math.max(0, Math.round(rawValue));
-    if (launches <= 0) {
-      continue;
-    }
-    const action = options.actions[index];
-    missionCounts[action.key] = launches;
-    totalSlotSeconds += launches * action.durationSeconds;
-  }
-
-  return {
-    crafts,
-    missionCounts,
-    totalXp,
-    geCost,
-    totalSlotSeconds,
-    remainingInventory: computeRemainingInventoryAfterMaxXpHorizon({
-      profile: options.profile,
-      actions: options.actions,
-      missionCounts,
-      crafts,
-    }),
-    finalCraftCounts,
-    status,
-  };
-}
-
 type ProgressionState = {
   launchCounts: ShipLaunchCounts;
   shipLevels: ShipLevelInfo[];
@@ -1958,7 +1563,7 @@ function missionOptionsFingerprint(options: MissionOption[]): string {
 }
 
 function missionDropRarityCacheKey(selection: ShinyRaritySelection): string {
-  return `${selection.rare ? 1 : 0}${selection.epic ? 1 : 0}${selection.legendary ? 1 : 0}${selection.fragments ? 1 : 0}`;
+  return `${selection.rare ? 1 : 0}${selection.epic ? 1 : 0}${selection.legendary ? 1 : 0}`;
 }
 
 function allowedShipDurationsCacheKey(
@@ -3313,214 +2918,6 @@ async function planForTargetHeuristic(
     },
     notes,
     availableCombos: [],
-  };
-}
-
-export async function planForMaxXpHorizon(
-  profile: PlayerProfile,
-  horizonDaysRaw: number,
-  plannerOptions: Pick<PlannerOptions, "missionDropRarities" | "fastMode" | "allowedShipDurations" | "solverFn" | "lootData" | "onProgress"> = {}
-): Promise<PlannerResult> {
-  const horizonDays = Math.max(0.01, Math.min(10, Number.isFinite(horizonDaysRaw) ? horizonDaysRaw : 1));
-  const totalHorizonSlotSeconds = Math.max(1, Math.floor(horizonDays * 24 * 3600 * 3));
-  const missionDropRarities = normalizeShinyRaritySelection(plannerOptions.missionDropRarities);
-  const allowedDurationsKey = allowedShipDurationsCacheKey(plannerOptions.allowedShipDurations);
-  const missionOptionFilter = plannerOptions.allowedShipDurations
-    ? (() => {
-        const allowed = new Set(
-          plannerOptions.allowedShipDurations!.map((sd) => `${sd.ship}|${sd.durationType}`)
-        );
-        return (options: MissionOption[]) => options.filter((o) => allowed.has(`${o.ship}|${o.durationType}`));
-      })()
-    : undefined;
-  const startedAtMs = Date.now();
-  const reportProgress = (
-    event: Omit<PlannerProgressEvent, "elapsedMs"> & { elapsedMs?: number }
-  ) => {
-    if (!plannerOptions.onProgress) {
-      return;
-    }
-    try {
-      plannerOptions.onProgress({
-        ...event,
-        elapsedMs: event.elapsedMs ?? Date.now() - startedAtMs,
-      });
-    } catch {
-      // Ignore progress callback errors.
-    }
-  };
-  const yieldForProgressFlush = async () => {
-    if (!plannerOptions.onProgress) {
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
-  };
-
-  reportProgress({
-    phase: "init",
-    message: "Preparing max-XP horizon candidates...",
-  });
-  await yieldForProgressFlush();
-
-  const progressionKey = profileProgressionCacheKey(profile, allowedDurationsKey);
-  const cachedProgression = progressionCache.get(progressionKey);
-  const progressionDeduped = cachedProgression
-    ? cachedProgression
-    : (() => {
-        const progressionCandidatesRaw = buildProgressionCandidates(profile, missionOptionFilter);
-        const deduped = dedupeProgressionCandidatesByMissionOptions(progressionCandidatesRaw);
-        progressionCache.set(progressionKey, deduped);
-        return deduped;
-      })();
-  const candidateLimit = plannerOptions.fastMode ? FAST_MODE_MAX_CANDIDATES : NORMAL_MODE_MAX_CANDIDATES;
-  const progressionCandidates = progressionDeduped.unique
-    .filter((candidate) => candidate.prepSlotSeconds <= totalHorizonSlotSeconds)
-    .slice(0, candidateLimit);
-  if (progressionCandidates.length === 0) {
-    throw new Error("No ship progression candidate fits inside the selected XP horizon.");
-  }
-
-  const lootData = plannerOptions.lootData ?? await getDefaultLootData();
-  const relevantItems = collectAllCraftPlanningItems();
-  let best:
-    | {
-        candidate: ProgressionCandidate;
-        actions: MissionAction[];
-        solved: MaxXpHorizonSolve;
-      }
-    | null = null;
-  const notes: string[] = [missionDropRarityNote(missionDropRarities)];
-
-  for (let candidateIndex = 0; candidateIndex < progressionCandidates.length; candidateIndex += 1) {
-    const candidate = progressionCandidates[candidateIndex];
-    reportProgress({
-      phase: "candidate",
-      message: `Solving max-XP horizon candidate ${candidateIndex + 1} / ${progressionCandidates.length}...`,
-      completed: candidateIndex,
-      total: progressionCandidates.length,
-    });
-    await yieldForProgressFlush();
-
-    const phased = buildPhasedActionsForCandidate(profile, candidate);
-    const phasedOptionKeys = new Set(phased.phasedOptions.map((option) => missionOptionKey(option)));
-    const baseOptions = candidate.missionOptions.filter((option) => !phasedOptionKeys.has(missionOptionKey(option)));
-    const combinedOptions = mergeMissionOptionsByKey(baseOptions, phased.phasedOptions);
-    const actions = await buildMissionActionsForOptions(
-      combinedOptions,
-      relevantItems,
-      lootData,
-      missionDropRarities
-    );
-    const remainingSlotSeconds = Math.max(0, totalHorizonSlotSeconds - candidate.prepSlotSeconds);
-    const solved = await solveMaxXpHorizon({
-      profile,
-      actions,
-      horizonSlotSeconds: remainingSlotSeconds,
-      maxMissionLaunchesByOption: phased.maxLaunchesByOption,
-      phasedChainConstraints: phased.phaseChains,
-      fastMode: plannerOptions.fastMode,
-      solverFn: plannerOptions.solverFn,
-    });
-
-    if (
-      !best ||
-      solved.totalXp > best.solved.totalXp + SCORE_EPS ||
-      (Math.abs(solved.totalXp - best.solved.totalXp) <= SCORE_EPS &&
-        solved.totalSlotSeconds + candidate.prepSlotSeconds < best.solved.totalSlotSeconds + best.candidate.prepSlotSeconds)
-    ) {
-      best = { candidate, actions, solved };
-    }
-  }
-
-  if (!best) {
-    throw new Error("Max-XP horizon solve did not produce a candidate result.");
-  }
-
-  reportProgress({
-    phase: "finalize",
-    message: "Max-XP horizon plan ready.",
-    completed: progressionCandidates.length,
-    total: progressionCandidates.length,
-    etaMs: 0,
-  });
-
-  const missionRows = buildMissionRows(best.actions, best.solved.missionCounts);
-  const craftRows = buildCraftRows(best.solved.crafts);
-  const prepHours = best.candidate.prepSlotSeconds / 3 / 3600;
-  const totalSlotSeconds = best.solved.totalSlotSeconds + best.candidate.prepSlotSeconds;
-  const expectedHours = totalSlotSeconds / 3 / 3600;
-  const projectedShipLevels = projectShipLevelsAfterPlannedLaunches({
-    baseShipLevels: profile.shipLevels,
-    prepSteps: best.candidate.prepSteps,
-    actions: best.actions,
-    missionCounts: best.solved.missionCounts,
-  });
-  const availableCombos: AvailableCombo[] = [];
-  const comboSet = new Set<string>();
-  const actionByKey = new Map(best.actions.map((action) => [action.key, action]));
-  for (const actionKey of Object.keys(best.solved.missionCounts)) {
-    const action = actionByKey.get(actionKey);
-    if (!action) {
-      continue;
-    }
-    const key = `${action.ship}|${action.durationType}|${action.targetAfxId}`;
-    if (comboSet.has(key)) {
-      continue;
-    }
-    comboSet.add(key);
-    availableCombos.push({
-      ship: action.ship,
-      durationType: action.durationType,
-      targetAfxId: action.targetAfxId,
-    });
-  }
-  notes.push(
-    "XP/time mode maximizes craft XP available from current inventory plus expected mission drops inside the selected horizon."
-  );
-  if (best.candidate.prepSlotSeconds > 0) {
-    notes.push(
-      "Progression prep launches reserve horizon time to unlock better ship options, but their expected drops are not credited to the max-XP craft inventory."
-    );
-  }
-  if (plannerOptions.fastMode) {
-    notes.push("Faster solve was enabled: fewer progression candidates were evaluated and the XP horizon MIP gap was relaxed.");
-  }
-
-  return {
-    mode: "xp",
-    targetItemId: "max-xp-plan",
-    quantity: 0,
-    priorityTime: 1,
-    geCost: best.solved.geCost,
-    totalSlotSeconds,
-    expectedHours,
-    weightedScore: Math.max(0, best.solved.totalXp),
-    crafts: craftRows,
-    missions: missionRows,
-    unmetItems: [],
-    targetBreakdown: {
-      requested: 0,
-      fromInventory: 0,
-      fromCraft: 0,
-      fromMissionsExpected: 0,
-      shortfall: 0,
-    },
-    progression: {
-      prepHours,
-      prepLaunches: compactProgressionSteps(best.candidate.prepSteps),
-      projectedShipLevels: progressionShipRows(projectedShipLevels),
-    },
-    notes,
-    availableCombos,
-    horizonDays,
-    maxXp: {
-      totalXp: best.solved.totalXp,
-      totalGeCost: best.solved.geCost,
-      remainingInventory: best.solved.remainingInventory,
-      finalCraftCounts: best.solved.finalCraftCounts,
-    },
   };
 }
 
