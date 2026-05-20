@@ -88,6 +88,10 @@ export function itemKeyToIconUrl(itemKey: string, size = 32): string | null {
   return `${ICON_CDN_BASE_URL}/${size}/egginc/${iconFilename}`;
 }
 
+export function isStoneFragmentKey(itemKey: string): boolean {
+  return artifactDisplayMap[itemKey]?.tierName === "Fragment";
+}
+
 export function isUntargetedTargetAfxId(afxId: number): boolean {
   return UNTARGETED_TARGET_AFX_IDS.has(afxId);
 }

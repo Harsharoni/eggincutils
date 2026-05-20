@@ -35,6 +35,7 @@ export async function POST(request: Request): Promise<Response> {
             epic: parsedPayload.data.includeInventoryEpic,
             legendary: parsedPayload.data.includeInventoryLegendary,
           },
+          includeStoneFragments: parsedPayload.data.includeInventoryFragments,
         });
     const validatedProfile = playerProfileSchema.safeParse(profile);
     if (!validatedProfile.success) {
@@ -57,6 +58,7 @@ export async function POST(request: Request): Promise<Response> {
           rare: parsedPayload.data.includeDropRare,
           epic: parsedPayload.data.includeDropEpic,
           legendary: parsedPayload.data.includeDropLegendary,
+          fragments: parsedPayload.data.includeDropFragments,
         },
         targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
         allowedShipDurations: parsedPayload.data.allowedShipDurations,

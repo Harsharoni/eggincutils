@@ -60,6 +60,7 @@ type ProfileSnapshot = {
   eid: string;
   inventory: Record<string, number>;
   craftCounts: Record<string, number>;
+  craftingXp: number;
   epicResearchFTLLevel: number;
   epicResearchZerogLevel: number;
   shipLevels: ShipLevelInfoDetailed[];
@@ -72,9 +73,11 @@ type PlannerSourceFilters = {
   includeInventoryRare: boolean;
   includeInventoryEpic: boolean;
   includeInventoryLegendary: boolean;
+  includeInventoryFragments: boolean;
   includeDropRare: boolean;
   includeDropEpic: boolean;
   includeDropLegendary: boolean;
+  includeDropFragments: boolean;
 };
 
 type ProfileApiResponse = ProfileSnapshot & { error?: string; details?: unknown };
@@ -817,6 +820,7 @@ function profileUrl(eid: string, filters: PlannerSourceFilters): string {
     includeInventoryRare: filters.includeInventoryRare ? "1" : "0",
     includeInventoryEpic: filters.includeInventoryEpic ? "1" : "0",
     includeInventoryLegendary: filters.includeInventoryLegendary ? "1" : "0",
+    includeInventoryFragments: filters.includeInventoryFragments ? "1" : "0",
   });
   return `/api/profile?${params.toString()}`;
 }
@@ -878,6 +882,7 @@ function buildDemoProfileSnapshot(response: PlanResponse): ProfileSnapshot {
     eid: "DEMO",
     inventory: {},
     craftCounts: {},
+    craftingXp: 0,
     epicResearchFTLLevel: response.profile.epicResearchFTLLevel,
     epicResearchZerogLevel: response.profile.epicResearchZerogLevel,
     shipLevels: [],
@@ -947,9 +952,11 @@ export default function MissionCraftPlannerPage() {
   const [includeInventoryRare, setIncludeInventoryRare] = useState(false);
   const [includeInventoryEpic, setIncludeInventoryEpic] = useState(false);
   const [includeInventoryLegendary, setIncludeInventoryLegendary] = useState(false);
+  const [includeInventoryFragments, setIncludeInventoryFragments] = useState(true);
   const [includeDropRare, setIncludeDropRare] = useState(false);
   const [includeDropEpic, setIncludeDropEpic] = useState(false);
   const [includeDropLegendary, setIncludeDropLegendary] = useState(false);
+  const [includeDropFragments, setIncludeDropFragments] = useState(true);
   const [fastMode, setFastMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -985,9 +992,11 @@ export default function MissionCraftPlannerPage() {
     includeInventoryRare,
     includeInventoryEpic,
     includeInventoryLegendary,
+    includeInventoryFragments,
     includeDropRare,
     includeDropEpic,
     includeDropLegendary,
+    includeDropFragments,
   };
 
   const shipSelectorSummary = useMemo(() => {
@@ -1404,6 +1413,10 @@ export default function MissionCraftPlannerPage() {
       if (savedIncludeInventoryLegendary != null) {
         setIncludeInventoryLegendary(savedIncludeInventoryLegendary);
       }
+      const savedIncludeInventoryFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments]);
+      if (savedIncludeInventoryFragments != null) {
+        setIncludeInventoryFragments(savedIncludeInventoryFragments);
+      }
       const savedIncludeDropRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare]);
       if (savedIncludeDropRare != null) {
         setIncludeDropRare(savedIncludeDropRare);
@@ -1415,6 +1428,10 @@ export default function MissionCraftPlannerPage() {
       const savedIncludeDropLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary]);
       if (savedIncludeDropLegendary != null) {
         setIncludeDropLegendary(savedIncludeDropLegendary);
+      }
+      const savedIncludeDropFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments]);
+      if (savedIncludeDropFragments != null) {
+        setIncludeDropFragments(savedIncludeDropFragments);
       }
       const savedDemoNoticeDismissed = readStoredBoolean([LOCAL_PREF_KEYS.plannerDemoNoticeDismissed]);
       if (savedDemoNoticeDismissed != null) {
@@ -1620,6 +1637,17 @@ export default function MissionCraftPlannerPage() {
       return;
     }
     try {
+      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments], includeInventoryFragments);
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+  }, [includeInventoryFragments, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    try {
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare], includeDropRare);
     } catch {
       // Ignore localStorage persistence errors.
@@ -1647,6 +1675,17 @@ export default function MissionCraftPlannerPage() {
       // Ignore localStorage persistence errors.
     }
   }, [includeDropLegendary, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    try {
+      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments], includeDropFragments);
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+  }, [includeDropFragments, prefsLoaded]);
 
   useEffect(() => {
     if (!prefsLoaded) {
@@ -1713,9 +1752,11 @@ export default function MissionCraftPlannerPage() {
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryRare], includeInventoryRare);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryEpic], includeInventoryEpic);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryLegendary], includeInventoryLegendary);
+      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments], includeInventoryFragments);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare], includeDropRare);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropEpic], includeDropEpic);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary], includeDropLegendary);
+      writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments], includeDropFragments);
 
       const canSolveClientSide = highsRef.current.ready && lootDataRef.current != null;
 
@@ -1757,6 +1798,7 @@ export default function MissionCraftPlannerPage() {
               rare: includeDropRare,
               epic: includeDropEpic,
               legendary: includeDropLegendary,
+              fragments: includeDropFragments,
             },
             targetCraftedOnly,
             allowedShipDurations: allowedShipDurationsForSolve,
@@ -1804,9 +1846,11 @@ export default function MissionCraftPlannerPage() {
           includeInventoryRare,
           includeInventoryEpic,
           includeInventoryLegendary,
+          includeInventoryFragments,
           includeDropRare,
           includeDropEpic,
           includeDropLegendary,
+          includeDropFragments,
           targetCraftedOnly,
           fastMode,
           allowedShipDurations: allowedShipDurationsForSolve,
@@ -1967,6 +2011,7 @@ export default function MissionCraftPlannerPage() {
           includeDropRare,
           includeDropEpic,
           includeDropLegendary,
+          includeDropFragments,
           allowedShipDurations: allowedShipDurationsForReplan,
           observedReturns: [],
           missionLaunches: [],
@@ -2180,6 +2225,7 @@ export default function MissionCraftPlannerPage() {
             rare: sourceFilters.includeDropRare,
             epic: sourceFilters.includeDropEpic,
             legendary: sourceFilters.includeDropLegendary,
+            fragments: sourceFilters.includeDropFragments,
           },
           solverFn: highsRef.current.solve,
           lootData: lootDataRef.current!,
@@ -2196,6 +2242,7 @@ export default function MissionCraftPlannerPage() {
           includeDropRare: sourceFilters.includeDropRare,
           includeDropEpic: sourceFilters.includeDropEpic,
           includeDropLegendary: sourceFilters.includeDropLegendary,
+          includeDropFragments: sourceFilters.includeDropFragments,
         };
         const res = await fetch("/api/plan/compare", {
           method: "POST",
@@ -2488,6 +2535,9 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixHeader} title="Slotted stones">
                 Slotted
               </span>
+              <span className={styles.matrixHeader} title="Stone fragments">
+                Fragments
+              </span>
 
               <span className={styles.matrixRowLabel}>Inventory</span>
               <span className={styles.matrixCell}>
@@ -2514,6 +2564,9 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeSlotted, setIncludeSlotted, "Inventory slotted stones")}
               </span>
+              <span className={styles.matrixCell}>
+                {renderSourceToggle(includeInventoryFragments, setIncludeInventoryFragments, "Inventory stone fragments")}
+              </span>
 
               <span className={styles.matrixRowLabel}>Dropped</span>
               <span className={styles.matrixCell}>
@@ -2525,7 +2578,9 @@ export default function MissionCraftPlannerPage() {
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeDropLegendary, setIncludeDropLegendary, "Dropped legendary shiny artifacts")}
               </span>
-              <span className={`${styles.matrixCell} ${styles.matrixCellMuted}`}>n/a</span>
+              <span className={styles.matrixCell}>
+                {renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}
+              </span>
             </div>
           </div>
 

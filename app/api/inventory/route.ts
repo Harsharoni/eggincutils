@@ -10,6 +10,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     eid: request.nextUrl.searchParams.get("eid") ?? "",
     includeSlotted: request.nextUrl.searchParams.get("includeSlotted") ?? undefined,
     inventorySource: request.nextUrl.searchParams.get("inventorySource") ?? undefined,
+    includeInventoryFragments: request.nextUrl.searchParams.get("includeInventoryFragments") ?? undefined,
   });
   if (!parsedQuery.success) {
     return new Response(
@@ -25,11 +26,13 @@ export async function GET(request: NextRequest): Promise<Response> {
     const profile = await getPlayerProfile(parsedQuery.data.eid, parsedQuery.data.includeSlotted, {
       inventorySource: parsedQuery.data.inventorySource,
       includeShinyArtifacts: false,
+      includeStoneFragments: parsedQuery.data.includeInventoryFragments,
     });
     return new Response(
       JSON.stringify({
         inventory: profile.inventory,
         craftCounts: profile.craftCounts,
+        craftingXp: profile.craftingXp,
       }),
       { status: 200 }
     );

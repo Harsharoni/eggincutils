@@ -23,6 +23,7 @@ function baseProfile(): PlayerProfile {
     eid: "EI_TEST",
     inventory: {},
     craftCounts: {},
+    craftingXp: 0,
     epicResearchFTLLevel: 0,
     epicResearchZerogLevel: 0,
     shipLevels: [],

@@ -131,7 +131,7 @@
 
 .sourceMatrix {
   display: grid;
-  grid-template-columns: minmax(82px, auto) repeat(4, minmax(40px, auto));
+  grid-template-columns: minmax(82px, auto) repeat(5, minmax(40px, auto));
   gap: 6px 8px;
   align-items: center;
   padding: 8px 10px;
@@ -410,7 +410,7 @@
 
 @media (max-width: 900px) {
   .sourceMatrix {
-    grid-template-columns: minmax(72px, auto) repeat(4, minmax(36px, auto));
+    grid-template-columns: minmax(72px, auto) repeat(5, minmax(36px, auto));
   }
 
   .actionColumn {

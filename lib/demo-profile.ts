@@ -29,6 +29,7 @@ export function createDemoProfile(): PlayerProfile {
     eid: DEMO_EID,
     inventory: {},
     craftCounts: {},
+    craftingXp: 0,
     epicResearchFTLLevel: DEMO_FTL_LEVEL,
     epicResearchZerogLevel: DEMO_ZEROG_LEVEL,
     shipLevels,

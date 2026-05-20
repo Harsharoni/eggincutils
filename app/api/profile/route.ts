@@ -13,6 +13,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     includeInventoryRare: request.nextUrl.searchParams.get("includeInventoryRare") ?? undefined,
     includeInventoryEpic: request.nextUrl.searchParams.get("includeInventoryEpic") ?? undefined,
     includeInventoryLegendary: request.nextUrl.searchParams.get("includeInventoryLegendary") ?? undefined,
+    includeInventoryFragments: request.nextUrl.searchParams.get("includeInventoryFragments") ?? undefined,
   });
   if (!parsedQuery.success) {
     return new Response(
@@ -32,6 +33,7 @@ export async function GET(request: NextRequest): Promise<Response> {
         epic: parsedQuery.data.includeInventoryEpic,
         legendary: parsedQuery.data.includeInventoryLegendary,
       },
+      includeStoneFragments: parsedQuery.data.includeInventoryFragments,
     });
     const validatedProfile = playerProfileSchema.safeParse(profile);
     if (!validatedProfile.success) {

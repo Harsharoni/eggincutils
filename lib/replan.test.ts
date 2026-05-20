@@ -16,6 +16,7 @@ function baseProfile(): PlayerProfile {
       puzzle_cube_1: 1,
     },
     craftCounts: {},
+    craftingXp: 0,
     epicResearchFTLLevel: 0,
     epicResearchZerogLevel: 0,
     shipLevels,

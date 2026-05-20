@@ -6,6 +6,12 @@ import React, { JSX, useEffect, useState } from "react";
 
 import { getArtifactDisplayData, getArtifactDisplayLabel } from "../../lib/artifact-display";
 import {
+  getCraftingLevelProgress,
+  getCraftingLevelThresholds,
+  getCraftingLevelTotalXpForLevel,
+} from "../../lib/crafting-levels";
+import { recipes } from "../../lib/recipes";
+import {
   LOCAL_PREF_KEYS,
   readFirstStoredString,
   readStoredBoolean,
@@ -15,8 +21,10 @@ import {
 import useHighsClient from "../../lib/use-highs-client";
 import {
   buildMaxXpExecutionPlan,
+  CraftLimits,
   Highs,
   MaxXpExecutionPlanNode,
+  MaxXpUsageSummary,
   Solution,
   optimizeCrafts,
   simulateGeEfficiencyPlan,
@@ -27,9 +35,14 @@ import styles from "./page.module.css";
 
 type SortKey = "xpPerGe" | "xp" | "tierXpPerGe" | "familyTier" | "name";
 type InventorySource = "main" | "virtue";
+type MaxXpPlanView = "tree" | "flat";
+type CraftingXpZoomMode = "level" | "full";
+type MaxXpFlatSortKey = "artifact" | "tier" | "manualCrafts" | "autoCrafts" | "xp" | "cost" | "netRemaining" | "usedBy";
+type SortDirection = "asc" | "desc";
 type InventoryResponse = {
   inventory?: Record<string, number>;
   craftCounts?: Record<string, number>;
+  craftingXp?: number;
   error?: string;
   details?: string;
 };
@@ -54,6 +67,30 @@ type ExecutionPlanRow = {
   cost: number;
   depth: number;
   prefix: string;
+  usage?: MaxXpUsageSummary;
+};
+
+type FlatPlanRow = {
+  artifact: string;
+  familyKey: string;
+  tier: number;
+  manualCrafts: number;
+  autoCrafts: number;
+  xp: number;
+  cost: number;
+  netRemaining: number;
+  usedBy: string;
+  usage: MaxXpUsageSummary;
+};
+
+type ConsumedIngredientRow = {
+  artifact: string;
+  familyKey: string;
+  tier: number;
+  inventoryConsumed: number;
+  netRemaining: number;
+  usedBy: string;
+  usage: MaxXpUsageSummary;
 };
 
 type EfficiencyStatusKind = "full" | "partial" | "blocked" | "belowThreshold";
@@ -79,6 +116,7 @@ type OptimizePayload = {
   solution: Solution;
   inventory: Record<string, number>;
   craftCounts: Record<string, number>;
+  craftingXp: number;
 };
 
 const SHARED_EID_KEYS = [LOCAL_PREF_KEYS.sharedEid, LOCAL_PREF_KEYS.legacyEid] as const;
@@ -125,11 +163,13 @@ async function getOptimalCrafts(
   highs: Highs,
   eid: string,
   includeSlotted: boolean,
+  includeFragments: boolean,
   saleEnabled: boolean,
-  inventorySource: InventorySource
+  inventorySource: InventorySource,
+  craftLimits: CraftLimits
 ): Promise<OptimizePayload> {
   const response = await fetch(
-    `/api/inventory?eid=${encodeURIComponent(eid)}&includeSlotted=${includeSlotted ? "true" : "false"}&inventorySource=${encodeURIComponent(inventorySource)}`
+    `/api/inventory?eid=${encodeURIComponent(eid)}&includeSlotted=${includeSlotted ? "true" : "false"}&includeInventoryFragments=${includeFragments ? "true" : "false"}&inventorySource=${encodeURIComponent(inventorySource)}`
   );
   let data: InventoryResponse | null = null;
   try {
@@ -146,10 +186,12 @@ async function getOptimalCrafts(
   }
   const inventory = data.inventory;
   const craftCounts = data.craftCounts || {};
+  const craftingXp = Math.max(0, Math.floor(data.craftingXp || 0));
   return {
-    solution: optimizeCrafts(highs, inventory, craftCounts, saleEnabled),
+    solution: optimizeCrafts(highs, inventory, craftCounts, saleEnabled, craftLimits),
     inventory,
     craftCounts,
+    craftingXp,
   };
 }
 
@@ -298,7 +340,10 @@ function getModeComparisonRows(solution: Solution, sortKey: SortKey): ModeCompar
   }
 }
 
-function getExecutionPlanRows(nodes: MaxXpExecutionPlanNode[]): ExecutionPlanRow[] {
+function getExecutionPlanRows(
+  nodes: MaxXpExecutionPlanNode[],
+  usageByArtifact: Record<string, MaxXpUsageSummary> = {}
+): ExecutionPlanRow[] {
   const rows: ExecutionPlanRow[] = [];
 
   const walk = (
@@ -321,6 +366,7 @@ function getExecutionPlanRows(nodes: MaxXpExecutionPlanNode[]): ExecutionPlanRow
       cost: node.cost,
       depth,
       prefix,
+      usage: usageByArtifact[node.artifact],
     });
 
     node.children.forEach((child, index) => {
@@ -333,6 +379,430 @@ function getExecutionPlanRows(nodes: MaxXpExecutionPlanNode[]): ExecutionPlanRow
   });
 
   return rows;
+}
+
+function normalizeCraftLimitInputs(inputs: Record<string, string>): CraftLimits {
+  const limits: CraftLimits = {};
+  for (const [artifact, rawValue] of Object.entries(inputs)) {
+    const trimmed = rawValue.trim();
+    if (trimmed === "") {
+      continue;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      continue;
+    }
+    limits[artifact] = Math.max(0, Math.round(parsed));
+  }
+  return limits;
+}
+
+function craftLimitsToInputs(limits: CraftLimits): Record<string, string> {
+  const inputs: Record<string, string> = {};
+  for (const [artifact, limit] of Object.entries(limits)) {
+    if (Number.isFinite(limit) && limit >= 0) {
+      inputs[artifact] = String(Math.max(0, Math.round(limit)));
+    }
+  }
+  return inputs;
+}
+
+function craftLimitsEqual(left: CraftLimits, right: CraftLimits): boolean {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    if ((left[key] ?? null) !== (right[key] ?? null)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseStoredCraftLimits(raw: string | null): CraftLimits {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const limits: CraftLimits = {};
+    for (const [artifact, value] of Object.entries(parsed)) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric >= 0) {
+        limits[artifact] = Math.max(0, Math.round(numeric));
+      }
+    }
+    return limits;
+  } catch {
+    return {};
+  }
+}
+
+function formatUsedBy(usage: MaxXpUsageSummary | undefined): string {
+  const entries = getUsedByEntries(usage);
+  if (entries.length === 0) {
+    return "";
+  }
+  return entries
+    .map(([artifact, quantity]) => `${getArtifactDisplayLabel(artifact)} x${quantity.toLocaleString()}`)
+    .join(", ");
+}
+
+function formatConsumes(usage: MaxXpUsageSummary | undefined): string {
+  if (!usage) {
+    return "";
+  }
+  const recipe = recipes[usage.artifact];
+  const totalCrafts = Math.max(0, Math.round(usage.manualCrafts + usage.autoCrafts));
+  if (!recipe || totalCrafts <= 0) {
+    return "";
+  }
+  return Object.entries(recipe.ingredients)
+    .filter(([, quantity]) => quantity > 0)
+    .sort((a, b) => getArtifactDisplayLabel(a[0]).localeCompare(getArtifactDisplayLabel(b[0])))
+    .map(([artifact, quantity]) => `${getArtifactDisplayLabel(artifact)} x${(quantity * totalCrafts).toLocaleString()}`)
+    .join(", ");
+}
+
+function getUsedByEntries(usage: MaxXpUsageSummary | undefined): Array<[string, number]> {
+  if (!usage) {
+    return [];
+  }
+  return Object.entries(usage.consumedBy)
+    .filter(([, quantity]) => quantity > 0)
+    .sort((a, b) => b[1] - a[1] || getArtifactDisplayLabel(a[0]).localeCompare(getArtifactDisplayLabel(b[0])));
+}
+
+function UsedByIcons({ usage }: { usage: MaxXpUsageSummary | undefined }): JSX.Element {
+  const entries = getUsedByEntries(usage);
+  const tooltip = formatUsedBy(usage);
+  if (entries.length === 0) {
+    return <span className={styles.usedByEmpty}>-</span>;
+  }
+  return (
+    <span className={styles.usedByIcons} title={tooltip}>
+      {entries.slice(0, 8).map(([artifact, quantity]) => {
+        const displayData = getArtifactDisplayData(artifact);
+        const label = `${getArtifactDisplayLabel(artifact)} x${quantity.toLocaleString()}`;
+        return (
+          <span key={artifact} className={styles.usedByIcon} title={tooltip} aria-label={label}>
+            {displayData ? (
+              <img src={displayData.smallIconUrl} alt="" className={styles.usedByIconImage} loading="lazy" />
+            ) : (
+              <span className={styles.usedByFallback} aria-hidden="true">?</span>
+            )}
+          </span>
+        );
+      })}
+      {entries.length > 8 && <span className={styles.usedByMore}>+{entries.length - 8}</span>}
+    </span>
+  );
+}
+
+function getUsageTooltip(usage: MaxXpUsageSummary | undefined): string {
+  if (!usage) {
+    return "";
+  }
+  const lines = [
+    `Starting inventory: ${usage.startingInventory.toLocaleString()}`,
+    `Inventory consumed: ${usage.inventoryConsumed.toLocaleString()}`,
+  ];
+  const usedBy = formatUsedBy(usage);
+  if (usedBy) {
+    lines.push(`Used by: ${usedBy}`);
+  }
+  const consumes = formatConsumes(usage);
+  if (consumes) {
+    lines.push(`Consumes: ${consumes}`);
+  }
+  return lines.join("\n");
+}
+
+function formatCraftingLevelLine(xp: number): string {
+  const progress = getCraftingLevelProgress(xp);
+  return `Level ${progress.level} · ${progress.xp.toLocaleString()} XP`;
+}
+
+function getCraftingLevelTooltip(xp: number): string {
+  const progress = getCraftingLevelProgress(xp);
+  if (progress.nextLevelXp == null || progress.xpForLevel == null) {
+    return `Level ${progress.level}\nMax crafting level reached.`;
+  }
+  const remaining = Math.max(0, progress.nextLevelXp - progress.xp);
+  return [
+    `Level ${progress.level}`,
+    `${progress.xpIntoLevel.toLocaleString()} / ${progress.xpForLevel.toLocaleString()} XP in current level`,
+    `${remaining.toLocaleString()} XP to level ${progress.level + 1}`,
+  ].join("\n");
+}
+
+function formatCompactXp(value: number): string {
+  const safeValue = Math.max(0, Math.floor(value));
+  if (safeValue >= 1_000_000_000) {
+    return `${trimFixed(safeValue / 1_000_000_000)}B`;
+  }
+  if (safeValue >= 1_000_000) {
+    return `${trimFixed(safeValue / 1_000_000)}M`;
+  }
+  if (safeValue >= 1_000) {
+    return `${trimFixed(safeValue / 1_000)}K`;
+  }
+  return safeValue.toLocaleString();
+}
+
+function trimFixed(value: number): string {
+  return value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2).replace(/\.?0+$/, "");
+}
+
+function CraftingXpSummaryBox({
+  currentXp,
+  planXp,
+  zoomMode,
+  onZoomModeChange,
+}: {
+  currentXp: number | null;
+  planXp: number;
+  zoomMode: CraftingXpZoomMode;
+  onZoomModeChange: (mode: CraftingXpZoomMode) => void;
+}): JSX.Element | null {
+  if (currentXp == null) {
+    return null;
+  }
+  const safeCurrentXp = Math.max(0, Math.floor(currentXp));
+  const safePlanXp = Math.max(0, Math.floor(planXp));
+  const postPlanXp = safeCurrentXp + safePlanXp;
+  const postProgress = getCraftingLevelProgress(postPlanXp);
+  const fullUpperThreshold = getCraftingLevelTotalXpForLevel(postProgress.maxLevel);
+  const isFullZoom = zoomMode === "full";
+  const lowerThreshold = isFullZoom ? 0 : getCraftingLevelTotalXpForLevel(postProgress.level);
+  const upperThreshold = isFullZoom
+    ? fullUpperThreshold
+    : postProgress.nextLevelXp ?? getCraftingLevelTotalXpForLevel(postProgress.level);
+  const progressRange = Math.max(1, upperThreshold - lowerThreshold);
+  const progressRatio = Math.max(0, Math.min(1, (postPlanXp - lowerThreshold) / progressRange));
+  const leftLevel = isFullZoom ? 1 : postProgress.level;
+  const rightLevel = isFullZoom
+    ? postProgress.maxLevel
+    : postProgress.nextLevelXp == null
+      ? postProgress.level
+      : postProgress.level + 1;
+  const tickMarks = isFullZoom
+    ? getCraftingLevelThresholds()
+        .filter((threshold) => threshold.level > 1 && threshold.level < postProgress.maxLevel)
+        .map((threshold) => ({
+          ...threshold,
+          pct: Math.max(0, Math.min(100, (threshold.xp / Math.max(1, fullUpperThreshold)) * 100)),
+        }))
+    : [];
+  return (
+    <div className={styles.craftingXpBox} title={getCraftingLevelTooltip(postPlanXp)}>
+      <div className={styles.craftingXpLine}>
+        <span>Current</span>
+        <strong title={getCraftingLevelTooltip(safeCurrentXp)}>{formatCraftingLevelLine(safeCurrentXp)}</strong>
+      </div>
+      <div className={styles.craftingXpLine}>
+        <span>Post plan</span>
+        <strong>{formatCraftingLevelLine(postPlanXp)}</strong>
+      </div>
+      <div className={styles.craftingXpProgress} aria-label={`Post-plan progress to level ${postProgress.level + 1}`}>
+        <div className={styles.craftingXpTrack}>
+          <span className={styles.craftingXpFill} style={{ width: `${progressRatio * 100}%` }} />
+          {tickMarks.map((tick) => (
+            <span
+              key={tick.level}
+              className={styles.craftingXpTick}
+              style={{ left: `${tick.pct}%` }}
+              title={`${formatCompactXp(tick.xp)} · Lvl ${tick.level}`}
+            />
+          ))}
+        </div>
+        <div className={styles.craftingXpThresholds}>
+          <span>{formatCompactXp(lowerThreshold)} · Lvl {leftLevel}</span>
+          <span className={styles.craftingXpZoomControls} aria-label="Crafting XP scale">
+            <button
+              type="button"
+              className={styles.craftingXpZoomButton}
+              disabled={isFullZoom}
+              title="Zoom out to Level 1 through Level 30"
+              onClick={() => onZoomModeChange("full")}
+            >
+              -
+            </button>
+            <button
+              type="button"
+              className={styles.craftingXpZoomButton}
+              disabled={!isFullZoom}
+              title="Zoom in to the current post-plan level"
+              onClick={() => onZoomModeChange("level")}
+            >
+              +
+            </button>
+          </span>
+          <span>{formatCompactXp(upperThreshold)} · Lvl {rightLevel}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getRecipeTooltip(artifact: string): string {
+  const recipe = recipes[artifact];
+  if (!recipe) {
+    return "";
+  }
+  const ingredients = Object.entries(recipe.ingredients)
+    .sort((a, b) => getArtifactDisplayLabel(a[0]).localeCompare(getArtifactDisplayLabel(b[0])))
+    .map(([ingredient, quantity]) => `${quantity.toLocaleString()}x ${getArtifactDisplayLabel(ingredient)}`);
+  return [
+    "Recipe:",
+    ...ingredients,
+    `XP: ${recipe.xp.toLocaleString()}`,
+    `Base GE cost: ${recipe.cost.toLocaleString()}`,
+  ].join("\n");
+}
+
+function getArtifactTierNumber(artifact: string): number {
+  const displayData = getArtifactDisplayData(artifact);
+  if (displayData?.tierNumber != null) {
+    return displayData.tierNumber;
+  }
+  const match = artifact.match(/_(\d+)$/);
+  if (!match) {
+    return 0;
+  }
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getArtifactFamilyKey(artifact: string): string {
+  return artifact.replace(/_\d+$/, "");
+}
+
+function compareFlatRowsByKey(left: FlatPlanRow, right: FlatPlanRow, key: MaxXpFlatSortKey): number {
+  switch (key) {
+    case "artifact":
+      return (
+        left.familyKey.localeCompare(right.familyKey) ||
+        left.tier - right.tier ||
+        getArtifactDisplayLabel(left.artifact).localeCompare(getArtifactDisplayLabel(right.artifact))
+      );
+    case "tier":
+      return left.tier - right.tier || compareFlatRowsByKey(left, right, "artifact");
+    case "manualCrafts":
+      return left.manualCrafts - right.manualCrafts || left.autoCrafts - right.autoCrafts || compareFlatRowsByKey(left, right, "artifact");
+    case "autoCrafts":
+      return left.autoCrafts - right.autoCrafts || left.manualCrafts - right.manualCrafts || compareFlatRowsByKey(left, right, "artifact");
+    case "xp":
+      return left.xp - right.xp || compareFlatRowsByKey(left, right, "manualCrafts");
+    case "cost":
+      return left.cost - right.cost || compareFlatRowsByKey(left, right, "manualCrafts");
+    case "netRemaining":
+      return left.netRemaining - right.netRemaining || compareFlatRowsByKey(left, right, "artifact");
+    case "usedBy":
+      return left.usedBy.localeCompare(right.usedBy) || compareFlatRowsByKey(left, right, "artifact");
+    default:
+      return compareFlatRowsByKey(left, right, "manualCrafts");
+  }
+}
+
+function getSortedFlatPlanRows(
+  rows: FlatPlanRow[],
+  sortKey: MaxXpFlatSortKey,
+  sortDirection: SortDirection
+): FlatPlanRow[] {
+  const sorted = [...rows].sort((left, right) => compareFlatRowsByKey(left, right, sortKey));
+  return sortDirection === "desc" ? sorted.reverse() : sorted;
+}
+
+function getDefaultFlatSortDirection(sortKey: MaxXpFlatSortKey): SortDirection {
+  return sortKey === "artifact" || sortKey === "usedBy" ? "asc" : "desc";
+}
+
+function compareConsumedIngredientRowsByKey(
+  left: ConsumedIngredientRow,
+  right: ConsumedIngredientRow,
+  key: MaxXpFlatSortKey
+): number {
+  switch (key) {
+    case "artifact":
+      return (
+        left.familyKey.localeCompare(right.familyKey) ||
+        left.tier - right.tier ||
+        getArtifactDisplayLabel(left.artifact).localeCompare(getArtifactDisplayLabel(right.artifact))
+      );
+    case "tier":
+      return left.tier - right.tier || compareConsumedIngredientRowsByKey(left, right, "artifact");
+    case "manualCrafts":
+      return left.inventoryConsumed - right.inventoryConsumed || compareConsumedIngredientRowsByKey(left, right, "artifact");
+    case "netRemaining":
+      return left.netRemaining - right.netRemaining || compareConsumedIngredientRowsByKey(left, right, "artifact");
+    case "usedBy":
+      return left.usedBy.localeCompare(right.usedBy) || compareConsumedIngredientRowsByKey(left, right, "artifact");
+    case "autoCrafts":
+    case "xp":
+    case "cost":
+    default:
+      return compareConsumedIngredientRowsByKey(left, right, "artifact");
+  }
+}
+
+function getSortedConsumedIngredientRows(
+  rows: ConsumedIngredientRow[],
+  sortKey: MaxXpFlatSortKey,
+  sortDirection: SortDirection
+): ConsumedIngredientRow[] {
+  const effectiveSortKey =
+    sortKey === "autoCrafts" || sortKey === "xp" || sortKey === "cost" ? "artifact" : sortKey;
+  const effectiveDirection = effectiveSortKey === sortKey ? sortDirection : getDefaultFlatSortDirection(effectiveSortKey);
+  const sorted = [...rows].sort((left, right) => compareConsumedIngredientRowsByKey(left, right, effectiveSortKey));
+  return effectiveDirection === "desc" ? sorted.reverse() : sorted;
+}
+
+function getFlatPlanRows(
+  usageByArtifact: Record<string, MaxXpUsageSummary>,
+  executionRows: ExecutionPlanRow[]
+): FlatPlanRow[] {
+  const totals = new Map<string, { xp: number; cost: number }>();
+  for (const row of executionRows) {
+    const existing = totals.get(row.artifact) || { xp: 0, cost: 0 };
+    existing.xp += row.xp;
+    existing.cost += row.cost;
+    totals.set(row.artifact, existing);
+  }
+  return Object.values(usageByArtifact)
+    .filter((usage) => Boolean((usage.manualCrafts > 0 || usage.autoCrafts > 0) && recipes[usage.artifact]))
+    .sort((a, b) => b.manualCrafts - a.manualCrafts || b.autoCrafts - a.autoCrafts || getArtifactDisplayLabel(a.artifact).localeCompare(getArtifactDisplayLabel(b.artifact)))
+    .map((usage) => ({
+      artifact: usage.artifact,
+      familyKey: getArtifactFamilyKey(usage.artifact),
+      tier: getArtifactTierNumber(usage.artifact),
+      manualCrafts: usage.manualCrafts,
+      autoCrafts: usage.autoCrafts,
+      xp: totals.get(usage.artifact)?.xp || 0,
+      cost: totals.get(usage.artifact)?.cost || 0,
+      netRemaining: usage.remaining,
+      usedBy: formatUsedBy(usage),
+      usage,
+    }));
+}
+
+function getConsumedIngredientRows(usageByArtifact: Record<string, MaxXpUsageSummary>): ConsumedIngredientRow[] {
+  return Object.values(usageByArtifact)
+    .filter((usage) => {
+      const isCraftRow = usage.manualCrafts > 0 || usage.autoCrafts > 0;
+      return !isCraftRow && (usage.inventoryConsumed > 0 || Object.keys(usage.consumedBy).length > 0);
+    })
+    .sort((a, b) => getArtifactDisplayLabel(a.artifact).localeCompare(getArtifactDisplayLabel(b.artifact)))
+    .map((usage) => ({
+      artifact: usage.artifact,
+      familyKey: getArtifactFamilyKey(usage.artifact),
+      tier: getArtifactTierNumber(usage.artifact),
+      inventoryConsumed: usage.inventoryConsumed,
+      netRemaining: usage.remaining,
+      usedBy: formatUsedBy(usage),
+      usage,
+    }));
 }
 
 function getGeEfficiencyStatusMap(
@@ -419,10 +889,19 @@ function getInventoryMatrixRows(inventory: Record<string, number> | null | undef
   return rows;
 }
 
-function ArtifactCell({ artifact, modeLabel }: { artifact: string; modeLabel?: string }): JSX.Element {
+function ArtifactCell({
+  artifact,
+  modeLabel,
+  hideTier = false,
+}: {
+  artifact: string;
+  modeLabel?: string;
+  hideTier?: boolean;
+}): JSX.Element {
   const displayData = getArtifactDisplayData(artifact);
+  const recipeTooltip = getRecipeTooltip(artifact);
   if (!displayData) {
-    return <span>{artifact}</span>;
+    return <span title={recipeTooltip || undefined}>{artifact}</span>;
   }
   return (
     <span className={styles.artifactCell}>
@@ -432,8 +911,8 @@ function ArtifactCell({ artifact, modeLabel }: { artifact: string; modeLabel?: s
           <img src={displayData.largeIconUrl} alt={displayData.name} className={styles.artifactIconLarge} loading="lazy" />
         </span>
       </span>
-      <span className={styles.artifactText}>
-        <span>{displayData.name} (T{displayData.tierNumber})</span>
+      <span className={styles.artifactText} title={recipeTooltip || undefined}>
+        <span>{hideTier ? displayData.name : `${displayData.name} (T${displayData.tierNumber})`}</span>
         {modeLabel && <span className={styles.artifactMode}>({modeLabel})</span>}
       </span>
     </span>
@@ -553,17 +1032,26 @@ export default function XpGeCraftPage(): JSX.Element {
   const highs = useHighsClient();
   const [eid, setEID] = useState<string>("");
   const [includeSlotted, setIncludeSlotted] = useState<boolean>(true);
+  const [includeFragments, setIncludeFragments] = useState<boolean>(true);
   const [craftingSale, setCraftingSale] = useState<boolean>(false);
   const [inventorySource, setInventorySource] = useState<InventorySource>("main");
   const [solution, setSolution] = useState<Solution | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("xpPerGe");
   const [hideUncraftable, setHideUncraftable] = useState<boolean>(true);
   const [minEfficiencyXpPerGe, setMinEfficiencyXpPerGe] = useState<number>(0);
+  const [maxXpPlanView, setMaxXpPlanView] = useState<MaxXpPlanView>("tree");
+  const [maxXpFlatSortKey, setMaxXpFlatSortKey] = useState<MaxXpFlatSortKey>("manualCrafts");
+  const [maxXpFlatSortDirection, setMaxXpFlatSortDirection] = useState<SortDirection>("desc");
+  const [craftingXpZoomMode, setCraftingXpZoomMode] = useState<CraftingXpZoomMode>("level");
+  const [standaloneOpen, setStandaloneOpen] = useState<boolean>(true);
+  const [appliedCraftLimits, setAppliedCraftLimits] = useState<CraftLimits>({});
+  const [draftCraftLimitInputs, setDraftCraftLimitInputs] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [prefsLoaded, setPrefsLoaded] = useState<boolean>(false);
   const [planSourceInventory, setPlanSourceInventory] = useState<Record<string, number> | null>(null);
   const [planSourceCraftCounts, setPlanSourceCraftCounts] = useState<Record<string, number>>({});
+  const [planSourceCraftingXp, setPlanSourceCraftingXp] = useState<number | null>(null);
 
   useEffect(() => {
     const savedEid = readFirstStoredString(SHARED_EID_KEYS);
@@ -574,6 +1062,10 @@ export default function XpGeCraftPage(): JSX.Element {
     if (savedIncludeSlotted != null) {
       setIncludeSlotted(savedIncludeSlotted);
     }
+    const savedIncludeFragments = readStoredBoolean([LOCAL_PREF_KEYS.craftIncludeInventoryFragments]);
+    if (savedIncludeFragments != null) {
+      setIncludeFragments(savedIncludeFragments);
+    }
     const savedCraftingSale = readStoredBoolean(SHARED_CRAFTING_SALE_KEYS);
     if (savedCraftingSale != null) {
       setCraftingSale(savedCraftingSale);
@@ -582,6 +1074,17 @@ export default function XpGeCraftPage(): JSX.Element {
     if (savedInventorySource === "main" || savedInventorySource === "virtue") {
       setInventorySource(savedInventorySource);
     }
+    const savedPlanView = readFirstStoredString([LOCAL_PREF_KEYS.craftMaxXpPlanView]);
+    if (savedPlanView === "tree" || savedPlanView === "flat") {
+      setMaxXpPlanView(savedPlanView);
+    }
+    const savedStandaloneOpen = readStoredBoolean([LOCAL_PREF_KEYS.craftStandaloneOpen]);
+    if (savedStandaloneOpen != null) {
+      setStandaloneOpen(savedStandaloneOpen);
+    }
+    const savedCraftLimits = parseStoredCraftLimits(readFirstStoredString([LOCAL_PREF_KEYS.craftManualLimits]));
+    setAppliedCraftLimits(savedCraftLimits);
+    setDraftCraftLimitInputs(craftLimitsToInputs(savedCraftLimits));
     setPrefsLoaded(true);
   }, []);
 
@@ -603,6 +1106,13 @@ export default function XpGeCraftPage(): JSX.Element {
     if (!prefsLoaded) {
       return;
     }
+    writeStoredBoolean([LOCAL_PREF_KEYS.craftIncludeInventoryFragments], includeFragments);
+  }, [includeFragments, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
     writeStoredBoolean(SHARED_CRAFTING_SALE_KEYS, craftingSale);
   }, [craftingSale, prefsLoaded]);
 
@@ -618,11 +1128,32 @@ export default function XpGeCraftPage(): JSX.Element {
   }, [inventorySource, prefsLoaded]);
 
   useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    writeStoredString([LOCAL_PREF_KEYS.craftMaxXpPlanView], maxXpPlanView);
+  }, [maxXpPlanView, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    writeStoredBoolean([LOCAL_PREF_KEYS.craftStandaloneOpen], standaloneOpen);
+  }, [standaloneOpen, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    writeStoredString([LOCAL_PREF_KEYS.craftManualLimits], JSON.stringify(appliedCraftLimits));
+  }, [appliedCraftLimits, prefsLoaded]);
+
+  useEffect(() => {
     if (!highs || !planSourceInventory) {
       return;
     }
-    setSolution(optimizeCrafts(highs, planSourceInventory, planSourceCraftCounts, craftingSale));
-  }, [highs, planSourceCraftCounts, planSourceInventory, craftingSale]);
+    setSolution(optimizeCrafts(highs, planSourceInventory, planSourceCraftCounts, craftingSale, appliedCraftLimits));
+  }, [highs, planSourceCraftCounts, planSourceInventory, craftingSale, appliedCraftLimits]);
 
   async function runOptimize(): Promise<void> {
     if (!highs) {
@@ -638,12 +1169,17 @@ export default function XpGeCraftPage(): JSX.Element {
     setSolution(null);
     setPlanSourceInventory(null);
     setPlanSourceCraftCounts({});
+    setPlanSourceCraftingXp(null);
     setIsLoading(true);
     try {
-      const result = await getOptimalCrafts(highs, eid, includeSlotted, craftingSale, inventorySource);
+      const nextLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
+      setAppliedCraftLimits(nextLimits);
+      setDraftCraftLimitInputs(craftLimitsToInputs(nextLimits));
+      const result = await getOptimalCrafts(highs, eid, includeSlotted, includeFragments, craftingSale, inventorySource, nextLimits);
       setSolution(result.solution);
       setPlanSourceInventory(result.inventory);
       setPlanSourceCraftCounts(result.craftCounts);
+      setPlanSourceCraftingXp(result.craftingXp);
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "Unable to load inventory.";
       setError(message);
@@ -662,6 +1198,100 @@ export default function XpGeCraftPage(): JSX.Element {
   useEffect(() => {
     setMinEfficiencyXpPerGe((previous) => Math.min(previous, efficiencySliderMax));
   }, [efficiencySliderMax]);
+
+  const draftCraftLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
+  const hasPendingCraftLimits = !craftLimitsEqual(draftCraftLimits, appliedCraftLimits);
+
+  function applyCraftLimitDrafts(): void {
+    const nextLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
+    setAppliedCraftLimits(nextLimits);
+    setDraftCraftLimitInputs(craftLimitsToInputs(nextLimits));
+  }
+
+  function resetCraftLimitDrafts(): void {
+    setDraftCraftLimitInputs(craftLimitsToInputs(appliedCraftLimits));
+  }
+
+  function setDraftCraftLimit(artifact: string, rawValue: string): void {
+    const sanitized = rawValue.replace(/[^\d]/g, "");
+    setDraftCraftLimitInputs((previous) => {
+      const next = { ...previous };
+      if (sanitized === "") {
+        delete next[artifact];
+      } else {
+        next[artifact] = sanitized;
+      }
+      return next;
+    });
+  }
+
+  function clearDraftCraftLimit(artifact: string): void {
+    setDraftCraftLimitInputs((previous) => {
+      const next = { ...previous };
+      delete next[artifact];
+      return next;
+    });
+  }
+
+  function renderMaxManualInput(artifact: string): JSX.Element {
+    const draftValue = draftCraftLimitInputs[artifact] || "";
+    const appliedValue = appliedCraftLimits[artifact];
+    const isPending = (draftValue === "" ? null : Number(draftValue)) !== (appliedValue ?? null);
+    return (
+      <input
+        className={`${styles.limitInput} ${isPending ? styles.limitInputPending : ""}`}
+        type="text"
+        inputMode="numeric"
+        value={draftValue}
+        placeholder="∞"
+        aria-label={`Max manual crafts for ${getArtifactDisplayLabel(artifact)}`}
+        title="Blank means unlimited. 0 excludes manual crafts but still allows auto-crafts needed by parent rows."
+        onChange={(event) => setDraftCraftLimit(artifact, event.target.value)}
+      />
+    );
+  }
+
+  function setFlatSort(sortKey: MaxXpFlatSortKey): void {
+    if (sortKey === maxXpFlatSortKey) {
+      setMaxXpFlatSortDirection((previous) => (previous === "desc" ? "asc" : "desc"));
+      return;
+    }
+    setMaxXpFlatSortKey(sortKey);
+    setMaxXpFlatSortDirection(getDefaultFlatSortDirection(sortKey));
+  }
+
+  function renderFlatSortHeader(
+    label: React.ReactNode,
+    sortKey: MaxXpFlatSortKey,
+    className?: string,
+    title?: string
+  ): JSX.Element {
+    const active = maxXpFlatSortKey === sortKey;
+    const directionLabel = maxXpFlatSortDirection === "desc" ? "▼" : "▲";
+    const titleLabel = title || (typeof label === "string" ? `Sort by ${label}` : "Sort column");
+    return (
+      <th className={className}>
+        <button
+          type="button"
+          className={`${styles.tableSortButton} ${active ? styles.tableSortButtonActive : ""}`}
+          onClick={() => setFlatSort(sortKey)}
+          title={titleLabel}
+        >
+          {label}
+          {active && <span className={styles.tableSortArrow} aria-hidden="true">{directionLabel}</span>}
+        </button>
+      </th>
+    );
+  }
+
+  function renderStackedHeader(top: string, bottom: string): JSX.Element {
+    return (
+      <span className={styles.stackedHeaderLabel}>
+        <span>{top}</span>
+        <span>{bottom}</span>
+      </span>
+    );
+  }
 
   const geEfficiencyPlan =
     solution && planSourceInventory
@@ -696,7 +1326,21 @@ export default function XpGeCraftPage(): JSX.Element {
         caughtError instanceof Error ? caughtError.message : "Unable to derive the Max-XP click order from this plan.";
     }
   }
-  const maxXpExecutionRows = maxXpExecutionPlan ? getExecutionPlanRows(maxXpExecutionPlan.steps) : [];
+  const maxXpExecutionRows = maxXpExecutionPlan ? getExecutionPlanRows(maxXpExecutionPlan.steps, maxXpExecutionPlan.usage) : [];
+  const maxXpFlatRows = maxXpExecutionPlan
+    ? getSortedFlatPlanRows(
+        getFlatPlanRows(maxXpExecutionPlan.usage, maxXpExecutionRows),
+        maxXpFlatSortKey,
+        maxXpFlatSortDirection
+      )
+    : [];
+  const maxXpConsumedIngredientRows = maxXpExecutionPlan
+    ? getSortedConsumedIngredientRows(
+        getConsumedIngredientRows(maxXpExecutionPlan.usage),
+        maxXpFlatSortKey,
+        maxXpFlatSortDirection
+      )
+    : [];
 
   return (
     <main className="page">
@@ -743,14 +1387,25 @@ export default function XpGeCraftPage(): JSX.Element {
           <button onClick={runOptimize} disabled={isLoading}>
             {isLoading ? "Calculating..." : "Calculate"}
           </button>
-          <label className={styles.inputCheckbox}>
-            <input
-              type="checkbox"
-              checked={includeSlotted}
-              onChange={(event) => setIncludeSlotted(event.target.checked)}
-            />
-            Include slotted stones as ingredients
-          </label>
+          <fieldset className={styles.ingredientSourceGroup}>
+            <legend>Include as ingredients</legend>
+            <label className={styles.inputCheckbox}>
+              <input
+                type="checkbox"
+                checked={includeSlotted}
+                onChange={(event) => setIncludeSlotted(event.target.checked)}
+              />
+              Slotted stones
+            </label>
+            <label className={styles.inputCheckbox}>
+              <input
+                type="checkbox"
+                checked={includeFragments}
+                onChange={(event) => setIncludeFragments(event.target.checked)}
+              />
+              Stone fragments
+            </label>
+          </fieldset>
           <label className={styles.inputCheckbox}>
             <input
               type="checkbox"
@@ -855,183 +1510,282 @@ export default function XpGeCraftPage(): JSX.Element {
               </div>
             </div>
 
-            <div className={styles.sortSection}>
-              <span>Sort rows by:</span>
-              <button
-                className={`${styles.sortButton} ${sortKey === "xpPerGe" ? styles.activeButton : ""}`}
-                onClick={() => setSortKey("xpPerGe")}
-              >
-                XP / GE
-              </button>
-              <button
-                className={`${styles.sortButton} ${sortKey === "xp" ? styles.activeButton : ""}`}
-                onClick={() => setSortKey("xp")}
-              >
-                Total XP
-              </button>
-              <button
-                className={`${styles.sortButton} ${sortKey === "tierXpPerGe" ? styles.activeButton : ""}`}
-                onClick={() => setSortKey("tierXpPerGe")}
-              >
-                Tier
-              </button>
-              <button
-                className={`${styles.sortButton} ${sortKey === "familyTier" ? styles.activeButton : ""}`}
-                onClick={() => setSortKey("familyTier")}
-              >
-                Family
-              </button>
-              <button
-                className={`${styles.sortButton} ${sortKey === "name" ? styles.activeButton : ""}`}
-                onClick={() => setSortKey("name")}
-              >
-                Name
-              </button>
-              <label className={styles.sortCheckbox}>
-                <input type="checkbox" checked={hideUncraftable} onChange={(event) => setHideUncraftable(event.target.checked)} />
-                Don&apos;t show uncraftable
-              </label>
-            </div>
-
-            <div className={styles.tableSection}>
-              <h3>Standalone Craft Options (Direct vs Auto-Crafting)</h3>
-              <div className={styles.summaryMeta}>
-                Standalone craft menu from your current inventory. Status shows whether each row would be fully used, partly used,
-                blocked, or skipped in the Max GE Efficiency Plan. Sorting changes the display only; crafting out of order can
-                change the plan. <span className={styles.inlineWarningLabel}>Warning:</span> auto-crafted artifacts cannot be shiny,
-                so you may want to manually craft high-value targets instead of following the plan blindly.
-              </div>
-              <div className={styles.statusLegend}>
-                <span className={styles.statusLegendItem}>
-                  <StatusDot
-                    status={{
-                      kind: "full",
-                      realizedCount: 0,
-                      label: "Fully included",
-                      title: "Fully included in the Max GE Efficiency Plan.",
-                    }}
-                  />{" "}
-                  Full
-                </span>
-                <span className={styles.statusLegendItem}>
-                  <StatusDot
-                    status={{
-                      kind: "partial",
-                      realizedCount: 0,
-                      label: "Partially included",
-                      title: "Partially included in the Max GE Efficiency Plan.",
-                    }}
-                  />{" "}
-                  Part
-                </span>
-                <span className={styles.statusLegendItem}>
-                  <StatusDot
-                    status={{
-                      kind: "blocked",
-                      realizedCount: 0,
-                      label: "Blocked",
-                      title: "No longer craftable by the time the plan reaches this row.",
-                    }}
-                  />{" "}
-                  Blocked
-                </span>
-                <span className={styles.statusLegendItem}>
-                  <StatusDot
-                    status={{
-                      kind: "belowThreshold",
-                      realizedCount: 0,
-                      label: "Below threshold",
-                      title: "Below the current minimum XP/GE threshold.",
-                    }}
-                  />{" "}
-                  Below threshold
-                </span>
-              </div>
-              <table className={styles.resultsTable}>
-                <thead>
-                  <tr>
-                    <th>Artifact</th>
-                    <th
-                      className={styles.num}
-                      title="Standalone craftable count from your current inventory. Yellow and red rows show standalone -> realized count in the current Max GE Efficiency Plan."
-                    >
-                      Count
-                    </th>
-                    <th className={styles.num}>Total XP</th>
-                    <th className={styles.num}>GE Cost</th>
-                    <th className={styles.num}>XP / GE</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleModeRows.map((row) => {
-                    const status = geEfficiencyStatusByRowKey[row.key];
-                    return (
-                    <tr key={row.key}>
-                      <td>
-                        <span className={styles.statusArtifactCell}>
-                          {status && <StatusDot status={status} />}
-                          <ArtifactCell artifact={row.artifact} modeLabel={row.modeLabel} />
-                        </span>
-                      </td>
-                      <td className={styles.num}>{getModeRowCountLabel(row, status)}</td>
-                      <td className={styles.num}>
-                        <span className={styles.valueTooltip} title={getXpTooltip(solution.crafts[row.artifact].xpPerCraft, row.count)}>
-                          {row.xp.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className={styles.num}>
-                        <span className={styles.valueTooltip} title={getCostTooltip(row.artifact, solution.crafts[row.artifact])}>
-                          {row.cost.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className={styles.num}>{row.xpPerGe.toFixed(2)}</td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <div className={styles.tableSection}>
-              <h3>Max-XP Craft Order</h3>
-              {maxXpExecutionPlan ? (
-                <>
-                  <div className={styles.summaryMeta}>
-                    Craft the unindented rows in order. Indented rows show the artifacts the game will auto-craft underneath those
-                    crafts after using any inventory the LP plan leaves available for ingredient consumption first.{" "}
-                    <span className={styles.inlineWarningLabel}>Warning:</span> auto-crafted artifacts cannot be shiny, so you may
-                    want to manually craft high-value targets instead of following this order blindly.
+            <details
+              className={styles.standaloneDrawer}
+              open={standaloneOpen}
+              onToggle={(event) => setStandaloneOpen(event.currentTarget.open)}
+            >
+              <summary className={styles.standaloneSummary}>
+                <div className={styles.standaloneHeaderMain}>
+                  <span className={styles.standaloneTitleRow}>
+                    <span className={styles.standaloneCaret} aria-hidden="true">▶</span>
+                    <span className={styles.standaloneHeaderTitle}>Standalone Craft Options</span>
+                  </span>
+                  <div className={styles.standaloneSortControls} onClick={(event) => event.stopPropagation()}>
+                    <div className={`${styles.sortSection} ${styles.standaloneSortSection}`}>
+                      <span>Sort rows by:</span>
+                      <button
+                        className={`${styles.sortButton} ${sortKey === "xpPerGe" ? styles.activeButton : ""}`}
+                        onClick={() => setSortKey("xpPerGe")}
+                      >
+                        XP / GE
+                      </button>
+                      <button
+                        className={`${styles.sortButton} ${sortKey === "xp" ? styles.activeButton : ""}`}
+                        onClick={() => setSortKey("xp")}
+                      >
+                        Total XP
+                      </button>
+                      <button
+                        className={`${styles.sortButton} ${sortKey === "tierXpPerGe" ? styles.activeButton : ""}`}
+                        onClick={() => setSortKey("tierXpPerGe")}
+                      >
+                        Tier
+                      </button>
+                      <button
+                        className={`${styles.sortButton} ${sortKey === "familyTier" ? styles.activeButton : ""}`}
+                        onClick={() => setSortKey("familyTier")}
+                      >
+                        Family
+                      </button>
+                      <button
+                        className={`${styles.sortButton} ${sortKey === "name" ? styles.activeButton : ""}`}
+                        onClick={() => setSortKey("name")}
+                      >
+                        Name
+                      </button>
+                    </div>
+                    <label className={`${styles.sortCheckbox} ${styles.standaloneCraftableToggle}`}>
+                      <input type="checkbox" checked={hideUncraftable} onChange={(event) => setHideUncraftable(event.target.checked)} />
+                      Don&apos;t show uncraftable
+                    </label>
                   </div>
-                  <table className={styles.resultsTable}>
-                    <thead>
-                      <tr>
-                        <th>Craft</th>
-                        <th className={styles.num}>Count</th>
-                        <th className={styles.num}>XP</th>
-                        <th
-                          className={styles.num}
-                          title="Direct craft spend for the rows shown here. Summing the whole tree matches the Max XP Plan total above."
-                        >
-                          Direct GE Cost
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {maxXpExecutionRows.map((row) => (
-                        <tr key={row.key} data-depth={row.depth} className={row.mode === "click" ? styles.executionRootRow : ""}>
+                </div>
+                <div className={styles.standaloneTopBox} onClick={(event) => event.stopPropagation()}>
+                  <CraftingXpSummaryBox
+                    currentXp={planSourceCraftingXp}
+                    planXp={Math.round(geEfficiencyPlan?.totalXp || 0)}
+                    zoomMode={craftingXpZoomMode}
+                    onZoomModeChange={setCraftingXpZoomMode}
+                  />
+                </div>
+              </summary>
+
+              <div className={styles.tableSection}>
+                <div className={styles.tableHeaderRow}>
+                  <div className={styles.tableHeaderCopy}>
+                    <div className={styles.statusLegend}>
+                      <span className={styles.statusLegendItem}>
+                        <StatusDot status={{ kind: "full", realizedCount: 0, label: "Fully included", title: "Fully included in the Max GE Efficiency Plan." }} /> Full
+                      </span>
+                      <span className={styles.statusLegendItem}>
+                        <StatusDot status={{ kind: "partial", realizedCount: 0, label: "Partially included", title: "Partially included in the Max GE Efficiency Plan." }} /> Part
+                      </span>
+                      <span className={styles.statusLegendItem}>
+                        <StatusDot status={{ kind: "blocked", realizedCount: 0, label: "Blocked", title: "No longer craftable by the time the plan reaches this row." }} /> Blocked
+                      </span>
+                      <span className={styles.statusLegendItem}>
+                        <StatusDot status={{ kind: "belowThreshold", realizedCount: 0, label: "Below threshold", title: "Below the current minimum XP/GE threshold." }} /> Below threshold
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <table className={styles.resultsTable}>
+                  <thead>
+                    <tr>
+                      <th>Artifact</th>
+                      <th className={styles.num} title="Standalone craftable count from your current inventory. Yellow and red rows show standalone -> realized count in the current Max GE Efficiency Plan.">Count</th>
+                      <th className={styles.num}>Total XP</th>
+                      <th className={styles.num}>GE Cost</th>
+                      <th className={styles.num}>XP / GE</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleModeRows.map((row) => {
+                      const status = geEfficiencyStatusByRowKey[row.key];
+                      return (
+                        <tr key={row.key}>
                           <td>
-                            <span className={styles.executionArtifactCell}>
-                              {row.prefix && <span className={styles.executionPrefix}>{row.prefix}</span>}
-                              <ArtifactCell artifact={row.artifact} />
+                            <span className={styles.statusArtifactCell}>
+                              {status && <StatusDot status={status} />}
+                              <ArtifactCell artifact={row.artifact} modeLabel={row.modeLabel} />
                             </span>
                           </td>
-                          <td className={styles.num}>{row.count.toLocaleString()}</td>
-                          <td className={styles.num}>{row.xp.toLocaleString()}</td>
-                          <td className={styles.num}>{row.cost.toLocaleString()}</td>
+                          <td className={styles.num}>{getModeRowCountLabel(row, status)}</td>
+                          <td className={styles.num}>
+                            <span className={styles.valueTooltip} title={getXpTooltip(solution.crafts[row.artifact].xpPerCraft, row.count)}>
+                              {row.xp.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className={styles.num}>
+                            <span className={styles.valueTooltip} title={getCostTooltip(row.artifact, solution.crafts[row.artifact])}>
+                              {row.cost.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className={styles.num}>{row.xpPerGe.toFixed(2)}</td>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <div className={`${styles.tableSection} ${styles.maxXpOrderPanel}`}>
+              {maxXpExecutionPlan ? (
+                <>
+                  <div className={styles.tableHeaderRow}>
+                    <div className={styles.tableHeaderCopy}>
+                      <div className={styles.sectionHeaderRow}>
+                        <h3>Max-XP Craft Order</h3>
+                      </div>
+                      <div className={styles.viewControl} aria-label="Max XP craft order view">
+                        <span>View:</span>
+                          <button
+                            className={`${styles.sortButton} ${maxXpPlanView === "tree" ? styles.activeButton : ""}`}
+                            onClick={() => setMaxXpPlanView("tree")}
+                          >
+                            Tree
+                          </button>
+                          <button
+                            className={`${styles.sortButton} ${maxXpPlanView === "flat" ? styles.activeButton : ""}`}
+                            onClick={() => setMaxXpPlanView("flat")}
+                          >
+                            Flat
+                          </button>
+                      </div>
+                      <div className={styles.summaryMeta}>
+                        {maxXpPlanView === "tree" ? (
+                          <>
+                            Craft the unindented rows in order. Indented rows show only the artifacts the game should actually auto-craft
+                            underneath those manual crafts after consuming available inventory first.{" "}
+                            <span className={styles.inlineWarningLabel}>Warning:</span> auto-crafted artifacts cannot be shiny, so you may
+                            want to manually craft high-value targets instead of following this order blindly.
+                          </>
+                        ) : (
+                          <>
+                            Flat view shows the same Max XP plan as one row per crafted artifact, useful for sorting by family, tier,
+                            manual or auto-craft count, XP, GE cost, remaining inventory, and ingredient usage.
+                          </>
+                        )}
+                      </div>
+                      {Object.keys(appliedCraftLimits).length > 0 && (
+                        <div className={styles.limitChips}>
+                          {Object.entries(appliedCraftLimits).map(([artifact, limit]) => (
+                            <button key={artifact} className={styles.limitChip} onClick={() => clearDraftCraftLimit(artifact)}>
+                              {getArtifactDisplayLabel(artifact)}: {limit === 0 ? "excluded" : `max ${limit.toLocaleString()}`} x
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <CraftingXpSummaryBox
+                      currentXp={planSourceCraftingXp}
+                      planXp={solution.totalXp}
+                      zoomMode={craftingXpZoomMode}
+                      onZoomModeChange={setCraftingXpZoomMode}
+                    />
+                  </div>
+                  {maxXpPlanView === "tree" ? (
+                    <table className={styles.resultsTable}>
+                      <thead>
+                        <tr>
+                          <th>Craft</th>
+                          <th className={styles.num}>Count</th>
+                          <th className={styles.num}>{renderStackedHeader("Max", "manual")}</th>
+                          <th className={styles.num}>XP</th>
+                          <th className={styles.num} title="Direct craft spend for the rows shown here. Summing the whole tree matches the Max XP Plan total above.">Direct GE Cost</th>
+                          <th className={styles.num}>{renderStackedHeader("Net", "remaining")}</th>
+                          <th>Used by</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {maxXpExecutionRows.map((row) => (
+                          <tr key={row.key} data-depth={row.depth} className={row.mode === "click" ? styles.executionRootRow : ""}>
+                            <td>
+                              <span className={styles.executionArtifactCell}>
+                                {row.prefix && <span className={styles.executionPrefix}>{row.prefix}</span>}
+                                <ArtifactCell artifact={row.artifact} />
+                              </span>
+                            </td>
+                            <td className={styles.num}>
+                              <span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.count.toLocaleString()}</span>
+                            </td>
+                            <td className={styles.num}>{row.mode === "click" && row.depth === 0 ? renderMaxManualInput(row.artifact) : "-"}</td>
+                            <td className={styles.num}>{row.xp.toLocaleString()}</td>
+                            <td className={styles.num}>{row.cost.toLocaleString()}</td>
+                            <td className={styles.num}>{row.usage?.remaining.toLocaleString() ?? "-"}</td>
+                            <td className={styles.usedByCell}><UsedByIcons usage={row.usage} /></td>
+                          </tr>
+                        ))}
+                        {maxXpConsumedIngredientRows.length > 0 && (
+                          <tr className={styles.ingredientSectionRow}>
+                            <td colSpan={7}>Ingredients consumed from inventory by this plan</td>
+                          </tr>
+                        )}
+                        {maxXpConsumedIngredientRows.map((row) => (
+                          <tr key={`consumed-${row.artifact}`} className={styles.baseIngredientRow}>
+                            <td><ArtifactCell artifact={row.artifact} /></td>
+                            <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.inventoryConsumed.toLocaleString()}</span></td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>{row.netRemaining.toLocaleString()}</td>
+                            <td className={styles.usedByCell}><UsedByIcons usage={row.usage} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <table className={styles.resultsTable}>
+                      <thead>
+                        <tr>
+                          {renderFlatSortHeader("Artifact", "artifact")}
+                          {renderFlatSortHeader("Tier", "tier", styles.num, "Sort by tier")}
+                          {renderFlatSortHeader(renderStackedHeader("Manual", "crafts"), "manualCrafts", styles.num, "Sort by manual crafts")}
+                          {renderFlatSortHeader(renderStackedHeader("Auto", "crafts"), "autoCrafts", styles.num, "Sort by auto crafts")}
+                          <th className={styles.num}>{renderStackedHeader("Max", "manual")}</th>
+                          {renderFlatSortHeader("XP", "xp", styles.num)}
+                          {renderFlatSortHeader("GE Cost", "cost", styles.num)}
+                          {renderFlatSortHeader(renderStackedHeader("Net", "remaining"), "netRemaining", styles.num, "Sort by net remaining")}
+                          {renderFlatSortHeader("Used by", "usedBy")}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {maxXpFlatRows.map((row) => (
+                          <tr key={`flat-${row.artifact}`}>
+                            <td><ArtifactCell artifact={row.artifact} hideTier /></td>
+                            <td className={styles.num}>T{row.tier}</td>
+                            <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.manualCrafts.toLocaleString()}</span></td>
+                            <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.autoCrafts.toLocaleString()}</span></td>
+                            <td className={styles.num}>{renderMaxManualInput(row.artifact)}</td>
+                            <td className={styles.num}>{row.xp.toLocaleString()}</td>
+                            <td className={styles.num}>{row.cost.toLocaleString()}</td>
+                            <td className={styles.num}>{row.netRemaining.toLocaleString()}</td>
+                            <td className={styles.usedByCell}><UsedByIcons usage={row.usage} /></td>
+                          </tr>
+                        ))}
+                        {maxXpConsumedIngredientRows.length > 0 && (
+                          <tr className={styles.ingredientSectionRow}>
+                            <td colSpan={9}>Ingredients consumed from inventory by this plan</td>
+                          </tr>
+                        )}
+                        {maxXpConsumedIngredientRows.map((row) => (
+                          <tr key={`flat-consumed-${row.artifact}`} className={styles.baseIngredientRow}>
+                            <td><ArtifactCell artifact={row.artifact} hideTier /></td>
+                            <td className={styles.num}>T{row.tier}</td>
+                            <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.inventoryConsumed.toLocaleString()}</span></td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>-</td>
+                            <td className={styles.num}>{row.netRemaining.toLocaleString()}</td>
+                            <td className={styles.usedByCell}><UsedByIcons usage={row.usage} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                   <div className={styles.summaryMeta}>
                     {maxXpExecutionPlan.totalTopLevelCrafts.toLocaleString()} total manual crafts across{" "}
                     {maxXpExecutionPlan.totalTopLevelRows.toLocaleString()} top-level entries.
@@ -1042,6 +1796,14 @@ export default function XpGeCraftPage(): JSX.Element {
               )}
             </div>
           </>
+        )}
+
+        {hasPendingCraftLimits && (
+          <div className={styles.pendingLimitBar}>
+            <span>Craft limits changed</span>
+            <button onClick={applyCraftLimitDrafts}>Apply &amp; recalculate</button>
+            <button className={styles.secondaryButton} onClick={resetCraftLimitDrafts}>Reset changes</button>
+          </div>
         )}
 
         {!solution && (

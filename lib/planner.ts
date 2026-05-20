@@ -1,6 +1,6 @@
 import type { LootJson, MissionLevelLootStore, MissionTargetLootStore } from "./loot-data";
 import type { HighsSolveResult } from "./highs";
-import { isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
+import { isStoneFragmentKey, isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
 import { getRecipe, recipes } from "./recipes";
 import {
   buildMissionOptions,
@@ -85,6 +85,7 @@ type ShinyRaritySelection = {
   rare: boolean;
   epic: boolean;
   legendary: boolean;
+  fragments: boolean;
 };
 
 export type AvailableCombo = {
@@ -192,6 +193,7 @@ const DEFAULT_INCLUDE_SHINY_RARITIES: ShinyRaritySelection = {
   rare: true,
   epic: true,
   legendary: true,
+  fragments: true,
 };
 
 class LruCache<K, V> {
@@ -254,6 +256,7 @@ function normalizeShinyRaritySelection(raw?: Partial<ShinyRaritySelection>): Shi
     rare: raw.rare !== false,
     epic: raw.epic !== false,
     legendary: raw.legendary !== false,
+    fragments: raw.fragments !== false,
   };
 }
 
@@ -269,9 +272,12 @@ function missionDropRarityNote(selection: ShinyRaritySelection): string {
     shinyTiers.push("Legendary");
   }
   if (shinyTiers.length === 0) {
-    return "Mission drops include common rarity only (R/E/L disabled by planner settings).";
+    return selection.fragments
+      ? "Mission drops include common rarity only (R/E/L disabled by planner settings)."
+      : "Mission drops include common rarity only; stone fragments are excluded.";
   }
-  return `Mission drops include common + ${shinyTiers.join(" + ")} rarities (per planner settings).`;
+  const fragmentText = selection.fragments ? "" : "; stone fragments excluded";
+  return `Mission drops include common + ${shinyTiers.join(" + ")} rarities${fragmentText} (per planner settings).`;
 }
 
 function getDiscountedCost(baseCost: number, craftCount: number): number {
@@ -527,6 +533,9 @@ function yieldsFromTarget(
   for (const item of target.items) {
     const itemKey = itemIdToKey(item.itemId);
     if (!items.has(itemKey)) {
+      continue;
+    }
+    if (!includeShinyRarities.fragments && isStoneFragmentKey(itemKey)) {
       continue;
     }
     const common = item.counts[0] || 0;
@@ -1563,7 +1572,7 @@ function missionOptionsFingerprint(options: MissionOption[]): string {
 }
 
 function missionDropRarityCacheKey(selection: ShinyRaritySelection): string {
-  return `${selection.rare ? 1 : 0}${selection.epic ? 1 : 0}${selection.legendary ? 1 : 0}`;
+  return `${selection.rare ? 1 : 0}${selection.epic ? 1 : 0}${selection.legendary ? 1 : 0}${selection.fragments ? 1 : 0}`;
 }
 
 function allowedShipDurationsCacheKey(

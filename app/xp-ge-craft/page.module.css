@@ -22,6 +22,24 @@
   gap: 6px;
 }
 
+.ingredientSourceGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--card), white 16%);
+}
+
+.ingredientSourceGroup legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
 .errorBox {
   margin-top: 12px;
   padding: 10px;
@@ -118,6 +136,7 @@
 }
 
 .summaryMeta {
+  max-width: 100%;
   font-size: 11px;
   color: var(--muted);
   line-height: 1.35;
@@ -252,6 +271,109 @@
 
 .tableSection {
   margin-top: 14px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.standaloneDrawer {
+  margin-top: 14px;
+  width: max-content;
+  min-width: 100%;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--card), white 12%);
+}
+
+.standaloneSummary {
+  list-style: none;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 9px 11px;
+  color: var(--navy);
+  font-weight: 800;
+}
+
+.standaloneSummary::-webkit-details-marker {
+  display: none;
+}
+
+.standaloneHeaderMain {
+  min-width: 0;
+}
+
+.standaloneTitleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.standaloneCaret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--panel), var(--accent) 10%);
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.standaloneDrawer[open] .standaloneCaret {
+  transform: rotate(90deg);
+}
+
+.standaloneHeaderTitle {
+  display: block;
+}
+
+.standaloneSortSection {
+  margin-top: 0;
+  cursor: default;
+  font-weight: 700;
+}
+
+.standaloneSortControls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: fit-content;
+  margin-top: 14px;
+  padding: 1px 0;
+  cursor: default;
+}
+
+.standaloneCraftableToggle {
+  margin-left: 0;
+}
+
+.standaloneTopBox {
+  display: block;
+  padding-left: 12px;
+  cursor: default;
+}
+
+.standaloneDrawer > .tableSection {
+  padding-inline: 11px;
+}
+
+.maxXpOrderPanel {
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--stroke), var(--accent) 12%);
+  border-radius: 8px;
+  background: linear-gradient(
+    170deg,
+    color-mix(in oklab, var(--panel), white 4%),
+    color-mix(in oklab, var(--panel), black 12%)
+  );
+  box-shadow: 0 1px 0 color-mix(in oklab, var(--accent), transparent 84%), var(--panel-shadow);
 }
 
 .tableSection h3 {
@@ -260,8 +382,173 @@
   color: var(--navy);
 }
 
-.resultsTable {
+.tableHeaderRow {
+  contain: inline-size;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 8px;
   width: 100%;
+}
+
+.tableHeaderCopy {
+  min-width: 0;
+  flex: 1 1 420px;
+  max-width: 100%;
+}
+
+.craftingXpBox {
+  flex: 0 0 auto;
+  min-width: 330px;
+  max-width: 360px;
+  padding: 8px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--panel), white 12%);
+  color: var(--ink);
+  font-size: 12px;
+  box-shadow: 0 8px 20px color-mix(in oklab, black, transparent 88%);
+}
+
+.craftingXpLine {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.craftingXpBox span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.craftingXpBox strong {
+  color: var(--navy);
+  font-weight: 800;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.craftingXpProgress {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--stroke);
+}
+
+.craftingXpTrack {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted), transparent 82%);
+}
+
+.craftingXpFill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+}
+
+.craftingXpTick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 1px;
+  background: color-mix(in oklab, var(--button-ink), transparent 42%);
+  pointer-events: auto;
+}
+
+.craftingXpThresholds {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.craftingXpThresholds > span:last-child {
+  text-align: right;
+}
+
+.craftingXpZoomControls {
+  display: inline-flex;
+  justify-self: center;
+  gap: 3px;
+}
+
+.craftingXpZoomButton {
+  width: 20px;
+  height: 18px;
+  border: 1px solid var(--stroke);
+  border-radius: 5px;
+  padding: 0;
+  background: color-mix(in oklab, var(--card), white 10%);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.craftingXpZoomButton:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.sectionHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sectionHeaderRow h3 {
+  margin: 0;
+}
+
+.segmentedControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--card), white 12%);
+}
+
+.segmentedControl button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--navy);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.viewControl {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.resultsTable {
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
 }
 
@@ -275,6 +562,57 @@
 
 .resultsTable thead th.num {
   text-align: right;
+}
+
+.resultsTable thead .tableSortButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: inherit;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-align: inherit;
+}
+
+.resultsTable thead th.num .tableSortButton {
+  justify-content: flex-end;
+}
+
+.stackedHeaderLabel {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.resultsTable thead th.num .stackedHeaderLabel {
+  align-items: flex-end;
+}
+
+.tableSortArrow {
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.resultsTable thead .tableSortButton:hover {
+  background: transparent;
+  box-shadow: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tableSortButtonActive {
+  color: var(--navy);
 }
 
 .resultsTable tbody tr:hover {
@@ -417,10 +755,144 @@
   background: color-mix(in oklab, var(--accent), transparent 96%);
 }
 
+.ingredientSectionRow td {
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: color-mix(in oklab, var(--panel), white 12%);
+}
+
+.baseIngredientRow td {
+  background: color-mix(in oklab, var(--card), white 8%);
+}
+
 .valueTooltip {
   text-decoration: underline dotted;
   text-underline-offset: 2px;
   cursor: help;
+}
+
+.usedByCell {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.usedByIcons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  max-width: 138px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.usedByIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--card), white 10%);
+}
+
+.usedByIconImage {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.usedByFallback {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.usedByMore {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.usedByEmpty {
+  color: var(--muted);
+}
+
+.limitInput {
+  width: 72px;
+  min-height: 28px;
+  text-align: right;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 3px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.limitInputPending {
+  border-color: color-mix(in oklab, var(--accent), white 10%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+}
+
+.limitChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.limitChip {
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  color: var(--navy);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pendingLimitBar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: fit-content;
+  max-width: calc(100vw - 32px);
+  margin: 18px auto 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in oklab, var(--accent), black 10%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel), white 14%);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  color: var(--navy);
+  font-weight: 800;
+}
+
+.pendingLimitBar button {
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: var(--accent);
+  color: var(--button-ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.pendingLimitBar .secondaryButton {
+  background: var(--card);
+  color: var(--navy);
 }
 
 .footnote {
@@ -434,4 +906,25 @@
   margin-top: 10px;
   display: flex;
   gap: 12px;
+}
+
+@media (max-width: 760px) {
+  .standaloneSummary {
+    display: block;
+  }
+
+  .standaloneTopBox {
+    padding: 8px 0 0;
+  }
+
+  .tableHeaderRow {
+    display: block;
+  }
+
+  .craftingXpBox {
+    margin-top: 8px;
+    min-width: 0;
+    width: 100%;
+    max-width: none;
+  }
 }
