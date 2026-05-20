@@ -130,6 +130,8 @@ export type PlannerOptions = {
   onBenchmarkSample?: (sample: PlannerBenchmarkSample) => void;
   solverFn?: SolverFunction;
   lootData?: LootJson;
+  disableNormalFastIncumbent?: boolean;
+  disableFastQuantityAcceleration?: boolean;
 };
 
 export type PlannerProgressEvent = {
@@ -184,6 +186,12 @@ const INTEGRATED_MAX_PHASES = 9;
 const PHASED_BUDGET_LAUNCHES = 5000;
 const BINARY_BIG_M = 5000;
 const LP_SCREENING_MILP_RESOLVES = 2;
+const NORMAL_GE_POLISH_TIME_LIMIT_SECONDS = 20;
+const FAST_QUANTITY_ACCELERATION_MIN_QUANTITY = 5;
+const FAST_QUANTITY_ACCELERATION_MAX_BLOCK_QUANTITY = 5;
+const NORMAL_SCALED_INCUMBENT_MAX_MILP_RESOLVES = 2;
+const MONOLITHIC_INCUMBENT_MAX_COMBOS = 6;
+const ENABLE_NORMAL_FAST_INCUMBENT_COMPARISON = false;
 const CLOSURE_CACHE_MAX_ENTRIES = 96;
 const PROGRESSION_CACHE_MAX_ENTRIES = 48;
 const MISSION_ACTION_CACHE_MAX_ENTRIES = 192;
@@ -1089,6 +1097,7 @@ async function solveUnifiedCraftMissionPlan(options: {
   geCostUpperBound?: number;
   strictGeObjective?: boolean;
   totalSlotSecondsUpperBound?: number;
+  timeLimitSeconds?: number;
   lpRelaxation?: boolean;
   targetCraftedOnly?: boolean;
   craftSkeleton?: CraftModelSkeleton;
@@ -1111,6 +1120,7 @@ async function solveUnifiedCraftMissionPlan(options: {
     geCostUpperBound,
     strictGeObjective = false,
     totalSlotSecondsUpperBound,
+    timeLimitSeconds,
     lpRelaxation = false,
     targetCraftedOnly = false,
     craftSkeleton,
@@ -1290,7 +1300,7 @@ async function solveUnifiedCraftMissionPlan(options: {
 
   // Binary indicator constraints for phased leveling chains:
   // For each phase i > 0: L_i <= M * z_i (z_i binary: 1 if phase active)
-  // For each phase i > 0: sum(L_{i-1} actions) >= cap_{i-1} * z_i (prev phase must be full)
+  // For each phase i > 0: every lower phase in the same ship/duration chain must be full.
   const phasedBinaryVars: string[] = [];
   let phasedConstraintIndex = 0;
   for (let chainIndex = 0; chainIndex < phasedChainConstraints.length; chainIndex += 1) {
@@ -1305,7 +1315,6 @@ async function solveUnifiedCraftMissionPlan(options: {
       if (currentIndexes.length === 0) {
         continue;
       }
-      const previousIndexes = actionIndexesByOption.get(previousOptionKey) || [];
       const zVar = `zp_${chainIndex}_${phaseIndex}`;
       phasedBinaryVars.push(zVar);
 
@@ -1331,16 +1340,20 @@ async function solveUnifiedCraftMissionPlan(options: {
       lines.push(`  pa_${phasedConstraintIndex}: ${formatLinearExpression(activationTerms)} <= 0`);
       phasedConstraintIndex += 1;
 
-      // sum(L_{i-1} actions) >= cap_{i-1} * z_i  =>  sum(L_{i-1}) - cap_{i-1} * z_i >= 0
-      const prevCap = caps[phaseIndex - 1];
-      if (prevCap > 0 && previousIndexes.length > 0) {
+      for (let previousPhaseIndex = 0; previousPhaseIndex < phaseIndex; previousPhaseIndex += 1) {
+        const previousPhaseKey = chain[previousPhaseIndex];
+        const previousIndexes = actionIndexesByOption.get(previousPhaseKey) || [];
+        const prevCap = Math.max(0, Math.round(caps[previousPhaseIndex] || 0));
+        if (prevCap <= 0) {
+          continue;
+        }
         const completionTerms: Array<{ coefficient: number; variable: string }> = [];
         for (const idx of previousIndexes) {
           completionTerms.push({ coefficient: 1, variable: missionVars[idx] });
         }
         completionTerms.push({ coefficient: -prevCap, variable: zVar });
-      lines.push(`  pb_${phasedConstraintIndex}: ${formatLinearExpression(completionTerms)} >= 0`);
-      phasedConstraintIndex += 1;
+        lines.push(`  pb_${phasedConstraintIndex}: ${formatLinearExpression(completionTerms)} >= 0`);
+        phasedConstraintIndex += 1;
       }
     }
   }
@@ -1473,6 +1486,9 @@ async function solveUnifiedCraftMissionPlan(options: {
   const useExactMipGap = !lpRelaxation && (strictGeObjective || hasGeCostUpperBound);
   const solution = await solve(lines.join("\n"), {
     ...(lpRelaxation ? {} : { mip_rel_gap: useExactMipGap ? 0 : 0.01 }),
+    ...(timeLimitSeconds !== undefined && Number.isFinite(timeLimitSeconds) && timeLimitSeconds > 0
+      ? { time_limit: timeLimitSeconds }
+      : {}),
   });
   const elapsedMs = Math.max(0, Date.now() - solveStartedAtMs);
   const status = solution.Status || "Unknown";
@@ -1797,6 +1813,21 @@ function progressionShipRows(shipLevels: ShipLevelInfo[]): ProgressionShipRow[] 
   }));
 }
 
+function durationTypeSortRank(durationType: DurationType): number {
+  switch (durationType) {
+    case "TUTORIAL":
+      return 0;
+    case "SHORT":
+      return 1;
+    case "LONG":
+      return 2;
+    case "EPIC":
+      return 3;
+    default:
+      return 99;
+  }
+}
+
 function buildMissionRows(actions: MissionAction[], missionCounts: Record<string, number>): PlanMissionRow[] {
   const actionByKey = new Map(actions.map((action) => [action.key, action]));
   return Object.entries(missionCounts)
@@ -1822,7 +1853,25 @@ function buildMissionRows(actions: MissionAction[], missionCounts: Record<string
       };
     })
     .filter((row): row is PlanMissionRow => row !== null)
-    .sort((a, b) => b.launches - a.launches || a.level - b.level);
+    .sort((a, b) => {
+      const shipDiff = a.ship.localeCompare(b.ship);
+      if (shipDiff !== 0) {
+        return shipDiff;
+      }
+      const durationDiff = durationTypeSortRank(a.durationType) - durationTypeSortRank(b.durationType);
+      if (durationDiff !== 0) {
+        return durationDiff;
+      }
+      const levelDiff = a.level - b.level;
+      if (levelDiff !== 0) {
+        return levelDiff;
+      }
+      const targetDiff = a.targetAfxId - b.targetAfxId;
+      if (targetDiff !== 0) {
+        return targetDiff;
+      }
+      return b.launches - a.launches;
+    });
 }
 
 function buildCraftRows(crafts: Record<string, number>): PlanCraftRow[] {
@@ -1846,6 +1895,597 @@ function expectedTargetFromMissions(
     total += (action.yields[targetKey] || 0) * launches;
   }
   return Math.max(0, total);
+}
+
+function chooseFastQuantityAccelerationBlock(quantity: number): number {
+  const safeQuantity = Math.max(1, Math.round(quantity));
+  if (safeQuantity < FAST_QUANTITY_ACCELERATION_MIN_QUANTITY) {
+    return safeQuantity;
+  }
+  if (safeQuantity <= 10) {
+    return 1;
+  }
+  return Math.max(1, Math.min(FAST_QUANTITY_ACCELERATION_MAX_BLOCK_QUANTITY, Math.ceil(safeQuantity / 25)));
+}
+
+function sumRecordValues(record: Record<string, number>): number {
+  return Object.values(record).reduce((sum, value) => sum + Math.max(0, value), 0);
+}
+
+function computeGeCostForCrafts(profile: PlayerProfile, crafts: Record<string, number>): number {
+  let total = 0;
+  for (const [itemKey, countRaw] of Object.entries(crafts)) {
+    const recipe = getRecipe(itemKey);
+    if (!recipe) {
+      continue;
+    }
+    total += getBatchDiscountedCost(
+      recipe.cost,
+      Math.max(0, profile.craftCounts[itemKey] || 0),
+      Math.max(0, Math.round(countRaw))
+    );
+  }
+  return total;
+}
+
+function profileWithoutClosureInventory(profile: PlayerProfile, closure: Set<string>): PlayerProfile {
+  const inventory = { ...profile.inventory };
+  for (const itemKey of closure) {
+    if (inventory[itemKey] !== undefined) {
+      inventory[itemKey] = 0;
+    }
+  }
+  return {
+    ...profile,
+    inventory,
+  };
+}
+
+function computeRemainingDemandForPlan(options: {
+  profile: PlayerProfile;
+  targetKey: string;
+  quantity: number;
+  closure: Set<string>;
+  crafts: Record<string, number>;
+  actions: MissionAction[];
+  missionCounts: Record<string, number>;
+  targetCraftedOnly?: boolean;
+}): Record<string, number> {
+  const {
+    profile,
+    targetKey,
+    quantity,
+    closure,
+    crafts,
+    actions,
+    missionCounts,
+    targetCraftedOnly = false,
+  } = options;
+  const actionByKey = new Map(actions.map((action) => [action.key, action]));
+  const remaining: Record<string, number> = {};
+
+  for (const itemKey of Array.from(closure).sort()) {
+    const demandQty = itemKey === targetKey ? Math.max(0, Math.round(quantity)) : 0;
+    const inventoryQty = itemKey === targetKey ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
+    const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
+    let missionOutput = 0;
+    if (!(targetCraftedOnly && itemKey === targetKey)) {
+      for (const [actionKey, launchesRaw] of Object.entries(missionCounts)) {
+        const action = actionByKey.get(actionKey);
+        if (!action) {
+          continue;
+        }
+        const launches = Math.max(0, Math.round(launchesRaw));
+        missionOutput += (action.yields[itemKey] || 0) * launches;
+      }
+    }
+
+    let ingredientConsumption = 0;
+    for (const [craftedItemKey, craftCountRaw] of Object.entries(crafts)) {
+      const craftCount = Math.max(0, Math.round(craftCountRaw));
+      if (craftCount <= 0) {
+        continue;
+      }
+      const recipe = getRecipe(craftedItemKey);
+      const ingredientQty = recipe?.ingredients[itemKey] || 0;
+      if (ingredientQty > 0) {
+        ingredientConsumption += ingredientQty * craftCount;
+      }
+    }
+
+    remaining[itemKey] = Math.max(
+      0,
+      demandQty - inventoryQty - craftOutput - missionOutput + ingredientConsumption
+    );
+  }
+
+  return remaining;
+}
+
+function computePreMissionDemandForPlan(options: {
+  profile: PlayerProfile;
+  targetKey: string;
+  quantity: number;
+  closure: Set<string>;
+  crafts: Record<string, number>;
+}): Record<string, number> {
+  const { profile, targetKey, quantity, closure, crafts } = options;
+  const remaining: Record<string, number> = {};
+  for (const itemKey of Array.from(closure).sort()) {
+    const demandQty = itemKey === targetKey ? Math.max(0, Math.round(quantity)) : 0;
+    const inventoryQty = itemKey === targetKey ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
+    const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
+    let ingredientConsumption = 0;
+    for (const [craftedItemKey, craftCountRaw] of Object.entries(crafts)) {
+      const craftCount = Math.max(0, Math.round(craftCountRaw));
+      if (craftCount <= 0) {
+        continue;
+      }
+      const recipe = getRecipe(craftedItemKey);
+      const ingredientQty = recipe?.ingredients[itemKey] || 0;
+      if (ingredientQty > 0) {
+        ingredientConsumption += ingredientQty * craftCount;
+      }
+    }
+    remaining[itemKey] = Math.max(0, demandQty - inventoryQty - craftOutput + ingredientConsumption);
+  }
+  return remaining;
+}
+
+function demandSatisfied(demand: Record<string, number>): boolean {
+  return Object.values(demand).every((qty) => qty <= 1e-6);
+}
+
+function applyMissionYieldToDemand(
+  demand: Record<string, number>,
+  action: MissionAction,
+  launchesRaw: number,
+  targetKey: string,
+  targetCraftedOnly: boolean
+): Record<string, number> {
+  const launches = Math.max(0, Math.round(launchesRaw));
+  if (launches <= 0) {
+    return { ...demand };
+  }
+  const next: Record<string, number> = { ...demand };
+  for (const [itemKey, yieldPerMission] of Object.entries(action.yields)) {
+    if (targetCraftedOnly && itemKey === targetKey) {
+      continue;
+    }
+    if (yieldPerMission <= 0 || !next[itemKey]) {
+      continue;
+    }
+    next[itemKey] = Math.max(0, next[itemKey] - yieldPerMission * launches);
+  }
+  return next;
+}
+
+function launchesNeededWithinChunk(options: {
+  demand: Record<string, number>;
+  action: MissionAction;
+  maxLaunches: number;
+  targetKey: string;
+  targetCraftedOnly: boolean;
+}): number {
+  const { demand, action, maxLaunches, targetKey, targetCraftedOnly } = options;
+  const cap = Math.max(0, Math.round(maxLaunches));
+  if (cap <= 0) {
+    return 0;
+  }
+  if (!demandSatisfied(applyMissionYieldToDemand(demand, action, cap, targetKey, targetCraftedOnly))) {
+    return cap;
+  }
+
+  let low = 0;
+  let high = cap;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (demandSatisfied(applyMissionYieldToDemand(demand, action, mid, targetKey, targetCraftedOnly))) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return low;
+}
+
+function scaleMissionCountsForRepeatedBlock(options: {
+  actions: MissionAction[];
+  missionCounts: Record<string, number>;
+  prepSteps: PrepProgressionStep[];
+  factor: number;
+}): Record<string, number> {
+  const { actions, missionCounts, prepSteps, factor } = options;
+  const safeFactor = Math.max(1, Math.round(factor));
+  if (safeFactor <= 1) {
+    return { ...missionCounts };
+  }
+
+  const actionByKey = new Map(actions.map((action) => [action.key, action]));
+  const prepRequirements = aggregatePrepOptionRequirements(prepSteps);
+  const byOption = new Map<string, Array<{ key: string; launches: number }>>();
+  for (const [actionKey, launchesRaw] of Object.entries(missionCounts)) {
+    const action = actionByKey.get(actionKey);
+    const launches = Math.max(0, Math.round(launchesRaw));
+    if (!action || launches <= 0) {
+      continue;
+    }
+    const group = byOption.get(action.optionKey) || [];
+    group.push({ key: actionKey, launches });
+    byOption.set(action.optionKey, group);
+  }
+
+  const scaled: Record<string, number> = {};
+  for (const [optionKey, entries] of byOption.entries()) {
+    const prepLaunches = Math.min(
+      entries.reduce((sum, entry) => sum + entry.launches, 0),
+      Math.max(0, Math.round(prepRequirements.get(optionKey)?.launches || 0))
+    );
+    let prepOverScale = Math.max(0, (safeFactor - 1) * prepLaunches);
+    const sorted = entries
+      .map((entry) => ({ ...entry, scaled: entry.launches * safeFactor }))
+      .sort((a, b) => b.launches - a.launches || a.key.localeCompare(b.key));
+
+    for (const entry of sorted) {
+      if (prepOverScale <= 0) {
+        break;
+      }
+      const reduction = Math.min(entry.scaled, prepOverScale);
+      entry.scaled -= reduction;
+      prepOverScale -= reduction;
+    }
+    for (const entry of sorted) {
+      const launches = Math.max(0, Math.round(entry.scaled));
+      if (launches > 0) {
+        scaled[entry.key] = launches;
+      }
+    }
+  }
+
+  return scaled;
+}
+
+function scaleUnifiedPlanForRequestedQuantity(options: {
+  profile: PlayerProfile;
+  targetKey: string;
+  requestedQuantity: number;
+  solvedQuantity: number;
+  closure: Set<string>;
+  actions: MissionAction[];
+  unified: UnifiedPlan;
+  prepSteps: PrepProgressionStep[];
+  prepNoYieldSlotSeconds: number;
+  targetCraftedOnly?: boolean;
+}): { unified: UnifiedPlan; totalSlotSeconds: number; repeatFactor: number; unmetTotal: number } {
+  const {
+    profile,
+    targetKey,
+    requestedQuantity,
+    solvedQuantity,
+    closure,
+    actions,
+    unified,
+    prepSteps,
+    prepNoYieldSlotSeconds,
+    targetCraftedOnly = false,
+  } = options;
+  const repeatFactor = Math.max(1, Math.ceil(Math.max(1, requestedQuantity) / Math.max(1, solvedQuantity)));
+  const crafts: Record<string, number> = {};
+  for (const [itemKey, countRaw] of Object.entries(unified.crafts)) {
+    const count = Math.max(0, Math.round(countRaw));
+    if (count > 0) {
+      crafts[itemKey] = count * repeatFactor;
+    }
+  }
+  const missionCounts = scaleMissionCountsForRepeatedBlock({
+    actions,
+    missionCounts: unified.missionCounts,
+    prepSteps,
+    factor: repeatFactor,
+  });
+  const remainingDemand = computeRemainingDemandForPlan({
+    profile,
+    targetKey,
+    quantity: requestedQuantity,
+    closure,
+    crafts,
+    actions,
+    missionCounts,
+    targetCraftedOnly,
+  });
+  const geCost = computeGeCostForCrafts(profile, crafts);
+  const missionSlotSeconds = actions.reduce((sum, action) => {
+    const launches = Math.max(0, Math.round(missionCounts[action.key] || 0));
+    return sum + launches * action.durationSeconds;
+  }, 0);
+
+  return {
+    unified: {
+      crafts,
+      missionCounts,
+      remainingDemand,
+      geCost,
+      totalSlotSeconds: missionSlotSeconds,
+      notes: [...unified.notes],
+    },
+    totalSlotSeconds: prepNoYieldSlotSeconds + missionSlotSeconds,
+    repeatFactor,
+    unmetTotal: sumRecordValues(remainingDemand),
+  };
+}
+
+async function refineScaledPlanWithProgression(options: {
+  profile: PlayerProfile;
+  targetKey: string;
+  requestedQuantity: number;
+  closure: Set<string>;
+  actions: MissionAction[];
+  unified: UnifiedPlan;
+  prepSteps: PrepProgressionStep[];
+  targetCraftedOnly?: boolean;
+  lootData: LootJson;
+  missionDropRarities: ShinyRaritySelection;
+}): Promise<{ actions: MissionAction[]; unified: UnifiedPlan; prunedLaunches: number }> {
+  const {
+    profile,
+    targetKey,
+    requestedQuantity,
+    closure,
+    actions,
+    unified,
+    prepSteps,
+    targetCraftedOnly = false,
+    lootData,
+    missionDropRarities,
+  } = options;
+  const actionByKey = new Map(actions.map((action) => [action.key, action]));
+  const refinedActionByKey = new Map(actionByKey);
+  const prepRequirements = aggregatePrepOptionRequirements(prepSteps);
+  const launchEntries = Object.entries(unified.missionCounts)
+    .map(([actionKey, launchesRaw]) => {
+      const action = actionByKey.get(actionKey);
+      const launches = Math.max(0, Math.round(launchesRaw));
+      return action && launches > 0 ? { action, launches } : null;
+    })
+    .filter((entry): entry is { action: MissionAction; launches: number } => entry !== null)
+    .sort((a, b) => {
+      const aPrep = prepRequirements.has(a.action.optionKey) ? 0 : 1;
+      const bPrep = prepRequirements.has(b.action.optionKey) ? 0 : 1;
+      if (aPrep !== bPrep) {
+        return aPrep - bPrep;
+      }
+      return a.action.durationSeconds - b.action.durationSeconds || b.launches - a.launches;
+    });
+
+  let demand = computePreMissionDemandForPlan({
+    profile,
+    targetKey,
+    quantity: requestedQuantity,
+    closure,
+    crafts: unified.crafts,
+  });
+  const launchCounts = shipLevelsToLaunchCounts(profile.shipLevels);
+  for (const step of prepSteps) {
+    incrementLaunchCounts(launchCounts, step.ship, step.durationType, step.launches);
+  }
+  const refinedMissionCounts: Record<string, number> = {};
+  let prunedLaunches = 0;
+  const dynamicActionCache = new Map<string, MissionAction | null>();
+
+  const resolveCurrentAction = async (original: MissionAction): Promise<MissionAction> => {
+    if (profile.shipLevels.length === 0) {
+      return original;
+    }
+    const shipLevels = computeShipLevelsFromLaunchCounts(launchCounts);
+    const option = buildMissionOptions(
+      shipLevels,
+      profile.epicResearchFTLLevel,
+      profile.epicResearchZerogLevel
+    ).find((candidate) => candidate.ship === original.ship && candidate.durationType === original.durationType);
+    if (!option) {
+      return original;
+    }
+    const cacheKey = `${missionOptionKey(option)}|${original.targetAfxId}`;
+    if (dynamicActionCache.has(cacheKey)) {
+      return dynamicActionCache.get(cacheKey) || original;
+    }
+    const currentActions = await buildMissionActionsForOptions(
+      [option],
+      closure,
+      lootData,
+      missionDropRarities
+    );
+    const current = currentActions.find((candidate) => candidate.targetAfxId === original.targetAfxId) || null;
+    dynamicActionCache.set(cacheKey, current);
+    if (current) {
+      refinedActionByKey.set(current.key, current);
+      return current;
+    }
+    const progressionOnlyAction: MissionAction = {
+      key: `${cacheKey}|progression`,
+      optionKey: missionOptionKey(option),
+      missionId: option.missionId,
+      ship: option.ship,
+      durationType: option.durationType,
+      level: option.level,
+      durationSeconds: option.durationSeconds,
+      targetAfxId: original.targetAfxId,
+      yields: {},
+    };
+    refinedActionByKey.set(progressionOnlyAction.key, progressionOnlyAction);
+    return progressionOnlyAction;
+  };
+
+  for (const entry of launchEntries) {
+    let remainingLaunches = entry.launches;
+    while (remainingLaunches > 0) {
+      const currentAction = await resolveCurrentAction(entry.action);
+      const currentInfo = computeShipLevelsFromLaunchCounts(launchCounts).find(
+        (ship) => ship.ship === entry.action.ship
+      );
+      const launchesToNext = currentInfo
+        ? launchesUntilShipLevelIncrease(
+            launchCounts,
+            entry.action.ship,
+            entry.action.durationType,
+            currentInfo.level,
+            currentInfo.maxLevel
+          )
+        : Number.POSITIVE_INFINITY;
+      const chunkLaunches = Math.max(
+        1,
+        Math.min(
+          remainingLaunches,
+          Number.isFinite(launchesToNext) ? Math.max(1, Math.round(launchesToNext)) : remainingLaunches
+        )
+      );
+      const launchesToUse = launchesNeededWithinChunk({
+        demand,
+        action: currentAction,
+        maxLaunches: chunkLaunches,
+        targetKey,
+        targetCraftedOnly,
+      });
+      if (launchesToUse > 0) {
+        refinedMissionCounts[currentAction.key] = (refinedMissionCounts[currentAction.key] || 0) + launchesToUse;
+        demand = applyMissionYieldToDemand(demand, currentAction, launchesToUse, targetKey, targetCraftedOnly);
+        incrementLaunchCounts(launchCounts, entry.action.ship, entry.action.durationType, launchesToUse);
+      }
+      prunedLaunches += Math.max(0, chunkLaunches - launchesToUse);
+      remainingLaunches -= chunkLaunches;
+      if (demandSatisfied(demand)) {
+        prunedLaunches += remainingLaunches;
+        remainingLaunches = 0;
+      }
+    }
+  }
+
+  const remainingDemand = computeRemainingDemandForPlan({
+    profile,
+    targetKey,
+    quantity: requestedQuantity,
+    closure,
+    crafts: unified.crafts,
+    actions: Array.from(refinedActionByKey.values()),
+    missionCounts: refinedMissionCounts,
+    targetCraftedOnly,
+  });
+  const totalSlotSeconds = Array.from(refinedActionByKey.values()).reduce((sum, action) => {
+    const launches = Math.max(0, Math.round(refinedMissionCounts[action.key] || 0));
+    return sum + launches * action.durationSeconds;
+  }, 0);
+
+  return {
+    actions: Array.from(refinedActionByKey.values()),
+    unified: {
+      ...unified,
+      missionCounts: refinedMissionCounts,
+      remainingDemand,
+      totalSlotSeconds,
+    },
+    prunedLaunches,
+  };
+}
+
+async function repairScaledPlanRemainingDemand(options: {
+  profile: PlayerProfile;
+  targetKey: string;
+  requestedQuantity: number;
+  closure: Set<string>;
+  actions: MissionAction[];
+  unified: UnifiedPlan;
+  prepSteps: PrepProgressionStep[];
+  targetCraftedOnly?: boolean;
+  solverFn?: SolverFunction;
+}): Promise<{ unified: UnifiedPlan; repairedLaunches: number; notes: string[] }> {
+  const {
+    profile,
+    targetKey,
+    requestedQuantity,
+    closure,
+    actions,
+    unified,
+    prepSteps,
+    targetCraftedOnly = false,
+    solverFn,
+  } = options;
+  const repairDemand: Record<string, number> = {};
+  for (const [itemKey, qty] of Object.entries(unified.remainingDemand)) {
+    if (qty <= 1e-6) {
+      continue;
+    }
+    if (targetCraftedOnly && itemKey === targetKey) {
+      continue;
+    }
+    repairDemand[itemKey] = qty;
+  }
+  if (Object.keys(repairDemand).length === 0) {
+    return {
+      unified,
+      repairedLaunches: 0,
+      notes: [],
+    };
+  }
+
+  const projectedShipLevels = projectShipLevelsAfterPlannedLaunches({
+    baseShipLevels: profile.shipLevels,
+    prepSteps,
+    actions,
+    missionCounts: unified.missionCounts,
+  });
+  const maxLevelByShip = new Map(projectedShipLevels.map((ship) => [ship.ship, ship.level]));
+  const repairActions = actions.filter((action) => {
+    const projectedLevel = maxLevelByShip.get(action.ship);
+    return projectedLevel !== undefined && action.level <= projectedLevel;
+  });
+  const allocation = await allocateMissionsWithSolver(repairActions, repairDemand, solverFn);
+  const repairedMissionCounts: Record<string, number> = { ...unified.missionCounts };
+  let repairedLaunches = 0;
+  for (const [actionKey, launchesRaw] of Object.entries(allocation.missionCounts)) {
+    const launches = Math.max(0, Math.round(launchesRaw));
+    if (launches <= 0) {
+      continue;
+    }
+    repairedMissionCounts[actionKey] = Math.max(0, Math.round(repairedMissionCounts[actionKey] || 0)) + launches;
+    repairedLaunches += launches;
+  }
+
+  if (repairedLaunches <= 0) {
+    return {
+      unified,
+      repairedLaunches: 0,
+      notes: allocation.notes,
+    };
+  }
+
+  const remainingDemand = computeRemainingDemandForPlan({
+    profile,
+    targetKey,
+    quantity: requestedQuantity,
+    closure,
+      crafts: unified.crafts,
+      actions,
+      missionCounts: repairedMissionCounts,
+    targetCraftedOnly,
+  });
+  const totalSlotSeconds = actions.reduce((sum, action) => {
+    const launches = Math.max(0, Math.round(repairedMissionCounts[action.key] || 0));
+    return sum + launches * action.durationSeconds;
+  }, 0);
+
+  return {
+    unified: {
+      ...unified,
+      missionCounts: repairedMissionCounts,
+      remainingDemand,
+      totalSlotSeconds,
+      notes: [...unified.notes, ...allocation.notes],
+    },
+    repairedLaunches,
+    notes: [
+      `Added ${repairedLaunches.toLocaleString()} repair launch${repairedLaunches === 1 ? "" : "es"} at currently projected ship levels to cover residual ingredient demand from one-time inventory used by the representative block.`,
+    ],
+  };
 }
 
 function buildTargetBreakdown(options: {
@@ -2943,6 +3583,13 @@ export async function planForTarget(
   const fastMode = Boolean(plannerOptions.fastMode);
   const missionDropRarities = normalizeShinyRaritySelection(plannerOptions.missionDropRarities);
   const targetCraftedOnly = Boolean(plannerOptions.targetCraftedOnly);
+  const fastQuantityAcceleration =
+    fastMode &&
+    !plannerOptions.disableFastQuantityAcceleration &&
+    quantityInt >= FAST_QUANTITY_ACCELERATION_MIN_QUANTITY;
+  const solveQuantity = fastQuantityAcceleration
+    ? chooseFastQuantityAccelerationBlock(quantityInt)
+    : quantityInt;
   const missionDropRarityKey = missionDropRarityCacheKey(missionDropRarities);
   const solverFn = plannerOptions.solverFn;
   const injectedLootData = plannerOptions.lootData;
@@ -3002,6 +3649,76 @@ export async function planForTarget(
     });
   };
 
+  let fastIncumbentResult: PlannerResult | null = null;
+  if (
+    !fastMode &&
+    ENABLE_NORMAL_FAST_INCUMBENT_COMPARISON &&
+    !plannerOptions.disableNormalFastIncumbent &&
+    quantityInt >= FAST_QUANTITY_ACCELERATION_MIN_QUANTITY
+  ) {
+    reportProgress({
+      phase: "init",
+      message: "Testing fast scaled incumbent for normal-mode comparison...",
+    });
+    await yieldForProgressFlush();
+    try {
+      fastIncumbentResult = await planForTarget(profile, targetItemId, quantityInt, priorityTime, {
+        fastMode: true,
+        targetCraftedOnly,
+        missionDropRarities,
+        allowedShipDurations: plannerOptions.allowedShipDurations,
+        solverFn,
+        lootData: injectedLootData,
+        disableNormalFastIncumbent: true,
+      });
+    } catch {
+      fastIncumbentResult = null;
+    }
+  }
+
+  const shouldAdoptFastIncumbentResult = (normalResult: PlannerResult): boolean => {
+    if (!fastIncumbentResult) {
+      return false;
+    }
+    const fastUnmet = fastIncumbentResult.unmetItems.reduce((sum, item) => sum + Math.max(0, item.quantity), 0);
+    const normalUnmet = normalResult.unmetItems.reduce((sum, item) => sum + Math.max(0, item.quantity), 0);
+    if (fastUnmet > normalUnmet + 1e-6) {
+      return false;
+    }
+    if (fastUnmet + 1e-6 < normalUnmet) {
+      return true;
+    }
+    const fastHours = Math.max(0, fastIncumbentResult.expectedHours);
+    const normalHours = Math.max(0, normalResult.expectedHours);
+    const fastGe = Math.max(0, fastIncumbentResult.geCost);
+    const normalGe = Math.max(0, normalResult.geCost);
+    if (fastHours + 1 / 3600 < normalHours && fastGe <= normalGe + SCORE_EPS) {
+      return true;
+    }
+    if (fastHours <= normalHours * 0.99 && fastGe <= normalGe * 1.05 + SCORE_EPS) {
+      return true;
+    }
+    const fastScore = normalizedScore(fastGe, fastIncumbentResult.totalSlotSeconds / 3, priorityTime, normalGe || 1, normalResult.totalSlotSeconds / 3 || 1);
+    const normalScore = normalizedScore(normalGe, normalResult.totalSlotSeconds / 3, priorityTime, normalGe || 1, normalResult.totalSlotSeconds / 3 || 1);
+    return fastScore + SCORE_EPS < normalScore && fastHours <= normalHours * 1.01;
+  };
+  const maybeAdoptFastIncumbentResult = (normalResult: PlannerResult): PlannerResult => {
+    if (!shouldAdoptFastIncumbentResult(normalResult) || !fastIncumbentResult) {
+      return normalResult;
+    }
+    return {
+      ...fastIncumbentResult,
+      notes: [
+        `Normal solve adopted the fast scaled incumbent because it compared better than the full normal result (${missionDurationLabel(
+          fastIncumbentResult.expectedHours * 3600
+        )} vs ${missionDurationLabel(normalResult.expectedHours * 3600)}, ${Math.round(
+          fastIncumbentResult.geCost
+        ).toLocaleString()} GE vs ${Math.round(normalResult.geCost).toLocaleString()} GE).`,
+        ...fastIncumbentResult.notes,
+      ],
+    };
+  };
+
   reportProgress({
     phase: "init",
     message: "Building ingredient closure and progression candidates...",
@@ -3010,6 +3727,7 @@ export async function planForTarget(
 
   const closure = getTargetClosureCached(targetKey);
   const closureKey = closureFingerprint(closure);
+  const representativeBlockProfile = profile;
 
   const progressionKey = profileProgressionCacheKey(profile, allowedDurationsKey);
   const cachedProgression = progressionCache.get(progressionKey);
@@ -3028,7 +3746,7 @@ export async function planForTarget(
   const candidateReuseKey = [
     progressionKey,
     `target:${targetKey}`,
-    `qty:${quantityInt}`,
+    `qty:${solveQuantity}`,
     `rar:${missionDropRarityKey}`,
     `craftedOnly:${targetCraftedOnly ? 1 : 0}`,
     `mode:${priorityTime <= SCORE_EPS ? "ge" : "mix"}`,
@@ -3078,16 +3796,16 @@ export async function planForTarget(
   }
 
   const craftSkeleton = getCraftSkeletonCached({
-    profile,
+    profile: representativeBlockProfile,
     targetKey,
-    quantity: quantityInt,
+    quantity: solveQuantity,
     closure,
   });
 
   const { geRef, timeRef } = computeObjectiveReferences({
-    profile,
+    profile: representativeBlockProfile,
     targetKey,
-    quantity: quantityInt,
+    quantity: solveQuantity,
     actions: baseActions,
   });
 
@@ -3281,9 +3999,9 @@ export async function planForTarget(
       }
       let baselineSolveMetrics: UnifiedSolveMetrics | null = null;
       const baselineUnified = await solveUnifiedCraftMissionPlan({
-        profile,
+        profile: representativeBlockProfile,
         targetKey,
-        quantity: quantityInt,
+        quantity: solveQuantity,
         priorityTime,
         closure,
         actions: input.candidateActions,
@@ -3313,9 +4031,9 @@ export async function planForTarget(
         let tieBreakSolveMetrics: UnifiedSolveMetrics | null = null;
         try {
           const tieBreakUnified = await solveUnifiedCraftMissionPlan({
-            profile,
+            profile: representativeBlockProfile,
             targetKey,
-            quantity: quantityInt,
+            quantity: solveQuantity,
             priorityTime: 1,
             closure,
             actions: input.candidateActions,
@@ -3418,10 +4136,456 @@ export async function planForTarget(
       current: typeof best,
       next: { unmetTotal: number; weightedScore: number; geCost: number; totalSlotSeconds: number; totalLaunches: number }
     ): boolean => !current || comparePlanQuality(next, current) < 0;
+    const expectedHoursForPlan = (
+      actions: MissionAction[],
+      missionCounts: Record<string, number>,
+      prepNoYieldSlotSeconds: number
+    ): number =>
+      estimateThreeSlotExpectedHours({
+        actions,
+        missionCounts,
+        residualSlotSeconds: prepNoYieldSlotSeconds,
+      });
+    const shouldReplaceWithScaledIncumbent = (
+      current: typeof best,
+      next: {
+        actions: MissionAction[];
+        missionCounts: Record<string, number>;
+        prepNoYieldSlotSeconds: number;
+        unmetTotal: number;
+        weightedScore: number;
+        geCost: number;
+        totalSlotSeconds: number;
+        totalLaunches: number;
+      }
+    ): boolean => {
+      if (!current) {
+        return true;
+      }
+      if (next.unmetTotal + 1e-6 < current.unmetTotal) {
+        return true;
+      }
+      if (next.unmetTotal > current.unmetTotal + 1e-6) {
+        return false;
+      }
+      if (next.unmetTotal <= 1e-6 && current.unmetTotal <= 1e-6) {
+        const nextHours = expectedHoursForPlan(next.actions, next.missionCounts, next.prepNoYieldSlotSeconds);
+        const currentHours = expectedHoursForPlan(
+          current.actions,
+          current.unified.missionCounts,
+          current.prepNoYieldSlotSeconds
+        );
+        const nextGe = Math.max(0, next.geCost);
+        const currentGe = Math.max(0, current.geCost);
+        if (nextHours + 1 / 3600 < currentHours && nextGe <= currentGe + SCORE_EPS) {
+          return true;
+        }
+        if (nextHours <= currentHours * 0.99 && nextGe <= currentGe * 1.05 + SCORE_EPS) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const chosenCombosForPlan = (
+      actions: MissionAction[],
+      missionCounts: Record<string, number>
+    ): AvailableCombo[] => {
+      const actionByKey = new Map(actions.map((action) => [action.key, action]));
+      const combos: AvailableCombo[] = [];
+      const seen = new Set<string>();
+      const launchedEntries = Object.entries(missionCounts)
+        .map(([actionKey, launchesRaw]) => {
+          const action = actionByKey.get(actionKey);
+          const launches = Math.max(0, Math.round(launchesRaw));
+          return action && launches > 0 ? { action, launches } : null;
+        })
+        .filter((entry): entry is { action: MissionAction; launches: number } => entry !== null)
+        .sort((a, b) => b.launches - a.launches || a.action.durationSeconds - b.action.durationSeconds);
+      for (const { action } of launchedEntries) {
+        const comboKey = `${action.ship}|${action.durationType}|${action.targetAfxId}`;
+        if (seen.has(comboKey)) {
+          continue;
+        }
+        seen.add(comboKey);
+        combos.push({
+          ship: action.ship,
+          durationType: action.durationType,
+          targetAfxId: action.targetAfxId,
+        });
+        if (combos.length >= MONOLITHIC_INCUMBENT_MAX_COMBOS) {
+          break;
+        }
+      }
+      return combos;
+    };
+    const shouldReplaceWithMonolithicIncumbent = (
+      current: {
+        actions: MissionAction[];
+        unified: UnifiedPlan;
+        prepNoYieldSlotSeconds: number;
+        totalSlotSeconds: number;
+        unmetTotal: number;
+        geCost: number;
+        totalLaunches: number;
+      },
+      next: {
+        actions: MissionAction[];
+        unified: UnifiedPlan;
+        prepNoYieldSlotSeconds: number;
+        totalSlotSeconds: number;
+        unmetTotal: number;
+        geCost: number;
+        totalLaunches: number;
+      }
+    ): boolean => {
+      if (next.unmetTotal + 1e-6 < current.unmetTotal) {
+        return true;
+      }
+      if (next.unmetTotal > current.unmetTotal + 1e-6) {
+        return false;
+      }
+      const currentHours = expectedHoursForPlan(current.actions, current.unified.missionCounts, current.prepNoYieldSlotSeconds);
+      const nextHours = expectedHoursForPlan(next.actions, next.unified.missionCounts, next.prepNoYieldSlotSeconds);
+      if (
+        nextHours <= currentHours + 1 / 3600 &&
+        next.geCost <= current.geCost + SCORE_EPS &&
+        (nextHours + 1 / 3600 < currentHours || next.geCost + SCORE_EPS < current.geCost)
+      ) {
+        return true;
+      }
+      const geRefCommon = Math.max(1, current.geCost, next.geCost);
+      const timeRefCommon = Math.max(1, current.totalSlotSeconds / 3, next.totalSlotSeconds / 3);
+      const currentScore = normalizedScore(current.geCost, current.totalSlotSeconds / 3, priorityTime, geRefCommon, timeRefCommon);
+      const nextScore = normalizedScore(next.geCost, next.totalSlotSeconds / 3, priorityTime, geRefCommon, timeRefCommon);
+      if (nextScore + SCORE_EPS < currentScore * 0.99 && nextHours <= currentHours * 1.05) {
+        return true;
+      }
+      return false;
+    };
+    const solveMonolithicIncumbentForCombo = async (
+      combo: AvailableCombo,
+      baseCandidate: ProgressionCandidate,
+      prepNoYieldSlotSeconds: number,
+      fullQuantityCraftSkeleton: CraftModelSkeleton
+    ): Promise<{
+      actions: MissionAction[];
+      unified: UnifiedPlan;
+      totalSlotSeconds: number;
+      weightedScore: number;
+      geCost: number;
+      unmetTotal: number;
+      totalLaunches: number;
+    } | null> => {
+      const baseLaunchCounts = shipLevelsToLaunchCounts(baseCandidate.shipLevels);
+      const phases = buildPhasedOptionPlan({
+        profile,
+        baseLaunchCounts,
+        ship: combo.ship,
+        durationType: combo.durationType,
+        budgetLaunches: PHASED_BUDGET_LAUNCHES,
+        maxPhases: INTEGRATED_MAX_PHASES,
+      });
+      const phasedOptions = phases.length > 0
+        ? phases.map((phase) => phase.option)
+        : baseCandidate.missionOptions.filter(
+            (option) => option.ship === combo.ship && option.durationType === combo.durationType
+          );
+      if (phasedOptions.length === 0) {
+        return null;
+      }
+      const comboActionsEntry = await getMissionActionsForOptionsCached({
+        missionOptions: phasedOptions,
+        relevantItems: closure,
+        closureKey,
+        lootData,
+        missionDropRarities,
+      });
+      const comboActions = comboActionsEntry.actions.filter((action) => action.targetAfxId === combo.targetAfxId);
+      if (comboActions.length === 0) {
+        return null;
+      }
+
+      const maxMissionLaunchesByOption: Record<string, number> = {};
+      const phasedChainConstraints: PhasedChainConstraint[] = [];
+      if (phases.length > 1) {
+        const chain: string[] = [];
+        const caps: number[] = [];
+        for (const phase of phases) {
+          const phaseKey = missionOptionKey(phase.option);
+          chain.push(phaseKey);
+          caps.push(phase.launches);
+          maxMissionLaunchesByOption[phaseKey] = Math.max(maxMissionLaunchesByOption[phaseKey] || 0, phase.launches);
+        }
+        phasedChainConstraints.push({ chain, caps });
+      }
+
+      const comboRefs = computeObjectiveReferences({
+        profile,
+        targetKey,
+        quantity: quantityInt,
+        actions: comboActions,
+      });
+      const unified = await solveUnifiedCraftMissionPlan({
+        profile,
+        targetKey,
+        quantity: quantityInt,
+        priorityTime,
+        closure,
+        actions: comboActions,
+        geRef: comboRefs.geRef,
+        timeRef: comboRefs.timeRef,
+        maxMissionLaunchesByOption,
+        phasedChainConstraints,
+        targetCraftedOnly,
+        craftSkeleton: fullQuantityCraftSkeleton,
+        solverFn,
+        onSolveMetrics: (metrics) => {
+          recordSolveMetrics(milpSolveStats, metrics);
+        },
+      });
+      const remainingDemand = computeRemainingDemandForPlan({
+        profile,
+        targetKey,
+        quantity: quantityInt,
+        closure,
+        crafts: unified.crafts,
+        actions: comboActions,
+        missionCounts: unified.missionCounts,
+        targetCraftedOnly,
+      });
+      const checkedUnified: UnifiedPlan = {
+        ...unified,
+        remainingDemand,
+      };
+      const totalSlotSeconds = prepNoYieldSlotSeconds + unified.totalSlotSeconds;
+      const unmetTotal = sumRecordValues(checkedUnified.remainingDemand);
+      const totalLaunches = sumRecordValues(checkedUnified.missionCounts);
+      return {
+        actions: comboActions,
+        unified: checkedUnified,
+        totalSlotSeconds,
+        weightedScore: normalizedScore(
+          checkedUnified.geCost,
+          totalSlotSeconds / 3,
+          priorityTime,
+          geRef,
+          timeRef
+        ),
+        geCost: checkedUnified.geCost,
+        unmetTotal,
+        totalLaunches,
+      };
+    };
 
     const geOnlyMode = priorityTime <= SCORE_EPS;
     const screeningLabel = geOnlyMode ? "Integer-constrained" : "Relaxed (fractional)";
     const screenedPastTense = geOnlyMode ? "Integer-screened" : "Relaxed-screened";
+
+    const tryScaledQuantityIncumbent = async (): Promise<void> => {
+      if (fastMode || geOnlyMode || quantityInt < FAST_QUANTITY_ACCELERATION_MIN_QUANTITY) {
+        return;
+      }
+      const blockQuantity = chooseFastQuantityAccelerationBlock(quantityInt);
+      if (blockQuantity >= quantityInt) {
+        return;
+      }
+
+      const blockProfile = profileWithoutClosureInventory(profile, closure);
+      const blockCraftSkeleton = getCraftSkeletonCached({
+        profile: blockProfile,
+        targetKey,
+        quantity: blockQuantity,
+        closure,
+      });
+      const blockRefs = computeObjectiveReferences({
+        profile: blockProfile,
+        targetKey,
+        quantity: blockQuantity,
+        actions: baseActions,
+      });
+      type BlockScreenResult = {
+        input: CandidateEvalInput;
+        unified: UnifiedPlan;
+        solveMetrics: UnifiedSolveMetrics | null;
+        weightedScore: number;
+        geCost: number;
+        totalSlotSeconds: number;
+        unmetTotal: number;
+        totalLaunches: number;
+      };
+      const blockScreened: BlockScreenResult[] = [];
+
+      reportProgress({
+        phase: "candidates",
+        message: `Testing small-block scaled incumbent candidates (${blockQuantity.toLocaleString()} representative target)...`,
+        completed: 0,
+        total: candidateTotal,
+        etaMs: null,
+      });
+      await yieldForProgressFlush();
+
+      for (let candidateIndex = 0; candidateIndex < candidateTotal; candidateIndex += 1) {
+        try {
+          const input = await prepareCandidateInput(progressionCandidates[candidateIndex]);
+          if (!input) {
+            continue;
+          }
+          let solveMetrics: UnifiedSolveMetrics | null = null;
+          const unified = await solveUnifiedCraftMissionPlan({
+            profile: blockProfile,
+            targetKey,
+            quantity: blockQuantity,
+            priorityTime,
+            closure,
+            actions: input.candidateActions,
+            geRef: blockRefs.geRef,
+            timeRef: blockRefs.timeRef,
+            requiredMissionLaunches: input.requiredMissionLaunches,
+            maxMissionLaunchesByOption: input.maxMissionLaunchesByOption,
+            phasedChainConstraints: input.phasedChainConstraints,
+            lpRelaxation: true,
+            targetCraftedOnly,
+            craftSkeleton: blockCraftSkeleton,
+            solverFn,
+            onSolveMetrics: (metrics) => {
+              solveMetrics = metrics;
+              recordSolveMetrics(lpSolveStats, metrics);
+            },
+          });
+          const totalSlotSeconds = input.prepNoYieldSlotSeconds + unified.totalSlotSeconds;
+          blockScreened.push({
+            input,
+            unified,
+            solveMetrics,
+            weightedScore: normalizedScore(
+              unified.geCost,
+              totalSlotSeconds / 3,
+              priorityTime,
+              blockRefs.geRef,
+              blockRefs.timeRef
+            ),
+            geCost: unified.geCost,
+            totalSlotSeconds,
+            unmetTotal: sumRecordValues(unified.remainingDemand),
+            totalLaunches: sumRecordValues(unified.missionCounts),
+          });
+        } catch (error) {
+          const details = error instanceof Error ? error.message : String(error);
+          solverErrors.push(`small-block scaled incumbent screening failed: ${details}`);
+        }
+      }
+
+      blockScreened.sort((a, b) => comparePlanQuality(a, b));
+      const blockMilpResolveCount = Math.min(
+        blockScreened.length,
+        Math.max(LP_SCREENING_MILP_RESOLVES, NORMAL_SCALED_INCUMBENT_MAX_MILP_RESOLVES)
+      );
+      const blockMilpCandidates = blockScreened.slice(0, blockMilpResolveCount);
+      let adopted = false;
+      for (const screened of blockMilpCandidates) {
+        try {
+          let solveMetrics: UnifiedSolveMetrics | null = null;
+          const unified = await solveUnifiedCraftMissionPlan({
+            profile: blockProfile,
+            targetKey,
+            quantity: blockQuantity,
+            priorityTime,
+            closure,
+            actions: screened.input.candidateActions,
+            geRef: blockRefs.geRef,
+            timeRef: blockRefs.timeRef,
+            requiredMissionLaunches: screened.input.requiredMissionLaunches,
+            maxMissionLaunchesByOption: screened.input.maxMissionLaunchesByOption,
+            phasedChainConstraints: screened.input.phasedChainConstraints,
+            lpRelaxation: false,
+            targetCraftedOnly,
+            craftSkeleton: blockCraftSkeleton,
+            solverFn,
+            onSolveMetrics: (metrics) => {
+              solveMetrics = metrics;
+              recordSolveMetrics(milpSolveStats, metrics);
+            },
+          });
+          const scaled = scaleUnifiedPlanForRequestedQuantity({
+            profile,
+            targetKey,
+            requestedQuantity: quantityInt,
+            solvedQuantity: blockQuantity,
+            closure,
+            actions: screened.input.candidateActions,
+            unified,
+            prepSteps: screened.input.candidate.prepSteps,
+            prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
+            targetCraftedOnly,
+          });
+          const refined = await refineScaledPlanWithProgression({
+            profile,
+            targetKey,
+            requestedQuantity: quantityInt,
+            closure,
+            actions: screened.input.candidateActions,
+            unified: scaled.unified,
+            prepSteps: screened.input.candidate.prepSteps,
+            targetCraftedOnly,
+            lootData,
+            missionDropRarities,
+          });
+          const totalSlotSeconds = screened.input.prepNoYieldSlotSeconds + refined.unified.totalSlotSeconds;
+          const unmetTotal = sumRecordValues(refined.unified.remainingDemand);
+          const totalLaunches = sumRecordValues(refined.unified.missionCounts);
+          const scaledCandidate = {
+            actions: refined.actions,
+            missionCounts: refined.unified.missionCounts,
+            prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
+            unmetTotal,
+            weightedScore: normalizedScore(
+              refined.unified.geCost,
+              totalSlotSeconds / 3,
+              priorityTime,
+              geRef,
+              timeRef
+            ),
+            geCost: refined.unified.geCost,
+            totalSlotSeconds,
+            totalLaunches,
+          };
+          if (shouldReplaceWithScaledIncumbent(best, scaledCandidate)) {
+            best = {
+              candidate: screened.input.candidate,
+              actions: refined.actions,
+              unified: refined.unified,
+              solveMetrics,
+              totalSlotSeconds,
+              weightedScore: scaledCandidate.weightedScore,
+              geCost: refined.unified.geCost,
+              unmetTotal,
+              totalLaunches,
+              prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
+            };
+            adopted = true;
+            refinementNotes.push(
+              `Normal solve adopted a scaled small-block incumbent: solved ${blockQuantity.toLocaleString()} target, scaled to ${quantityInt.toLocaleString()}, then replayed launches through projected ship-level gains.`
+            );
+            refinementNotes.push(
+              "Scaled incumbent solved its representative block with required-item inventory ignored, then applied current inventory once during final replay."
+            );
+            if (refined.prunedLaunches > 0) {
+              refinementNotes.push(
+                `Scaled incumbent pruned ${refined.prunedLaunches.toLocaleString()} launches after projected ship level gains improved expected drops.`
+              );
+            }
+          }
+        } catch (error) {
+          const details = error instanceof Error ? error.message : String(error);
+          solverErrors.push(`small-block scaled incumbent integer solve failed: ${details}`);
+        }
+      }
+      if (!adopted && blockMilpCandidates.length > 0) {
+        refinementNotes.push(
+          `Normal solve checked ${blockMilpCandidates.length.toLocaleString()} small-block scaled incumbent candidate${blockMilpCandidates.length === 1 ? "" : "s"}; none beat the full-quantity integer plan.`
+        );
+      }
+    };
 
     // Phase 1: screen all candidates (LP for mixed priorities, MILP for GE-only)
     type LpScreenResult = {
@@ -3689,7 +4853,11 @@ export async function planForTarget(
       throw new Error(`unified HiGHS solve failed across all horizon candidates (${details})`);
     }
 
-    if (!geOnlyMode && best.unmetTotal <= 1e-6 && best.geCost > SCORE_EPS) {
+    if (best.unmetTotal <= 1e-6) {
+      await tryScaledQuantityIncumbent();
+    }
+
+    if (!geOnlyMode && !fastMode && best.unmetTotal <= 1e-6 && best.geCost > SCORE_EPS) {
       const polishInput = await prepareCandidateInput(best.candidate);
       if (polishInput) {
         const baselineExpectedHours = estimateThreeSlotExpectedHours({
@@ -3713,7 +4881,7 @@ export async function planForTarget(
             const polishedUnified = await solveUnifiedCraftMissionPlan({
               profile,
               targetKey,
-              quantity: quantityInt,
+              quantity: solveQuantity,
               priorityTime: 0,
               closure,
               actions: polishInput.candidateActions,
@@ -3724,6 +4892,7 @@ export async function planForTarget(
               phasedChainConstraints: polishInput.phasedChainConstraints,
               strictGeObjective: true,
               totalSlotSecondsUpperBound: missionSlotSecondsBudget,
+              timeLimitSeconds: NORMAL_GE_POLISH_TIME_LIMIT_SECONDS,
               lpRelaxation: false,
               targetCraftedOnly,
               craftSkeleton,
@@ -3778,11 +4947,16 @@ export async function planForTarget(
                 ).toLocaleString()} without increasing expected mission time.`
               );
             }
-          } catch {
-            // Ignore polish failures and keep the baseline candidate result.
+          } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            refinementNotes.push(
+              `GE polish did not complete within the conservative ${NORMAL_GE_POLISH_TIME_LIMIT_SECONDS}s limit or returned no usable improvement (${details}); kept the baseline integer plan.`
+            );
           }
         }
       }
+    } else if (!geOnlyMode && fastMode) {
+      refinementNotes.push("Fast mode skipped GE polish to avoid spending solve time on optional craft-cost refinement.");
     }
 
     // Phased leveling is now integrated into every candidate evaluation via
@@ -3812,27 +4986,176 @@ export async function planForTarget(
       missionOptionsFingerprint(best.candidate.missionOptions)
     );
 
-    const missionRows = buildMissionRows(best.actions, best.unified.missionCounts);
-    const craftRows = buildCraftRows(best.unified.crafts);
+    let outputActions = best.actions;
+    let outputUnified = best.unified;
+    let outputTotalSlotSeconds = best.totalSlotSeconds;
+    let outputWeightedScore = best.weightedScore;
+    let outputUnmetTotal = best.unmetTotal;
+    if (fastQuantityAcceleration && solveQuantity < quantityInt) {
+      const scaled = scaleUnifiedPlanForRequestedQuantity({
+        profile,
+        targetKey,
+        requestedQuantity: quantityInt,
+        solvedQuantity: solveQuantity,
+        closure,
+        actions: best.actions,
+        unified: best.unified,
+        prepSteps: best.candidate.prepSteps,
+        prepNoYieldSlotSeconds: best.prepNoYieldSlotSeconds,
+        targetCraftedOnly,
+      });
+      const refined = await refineScaledPlanWithProgression({
+        profile,
+        targetKey,
+        requestedQuantity: quantityInt,
+        closure,
+        actions: best.actions,
+        unified: scaled.unified,
+        prepSteps: best.candidate.prepSteps,
+        targetCraftedOnly,
+        lootData,
+        missionDropRarities,
+      });
+      outputActions = refined.actions;
+      outputUnified = refined.unified;
+      outputTotalSlotSeconds = best.prepNoYieldSlotSeconds + refined.unified.totalSlotSeconds;
+      outputUnmetTotal = sumRecordValues(refined.unified.remainingDemand);
+      if (outputUnmetTotal > 1e-6) {
+        const repaired = await repairScaledPlanRemainingDemand({
+          profile,
+          targetKey,
+          requestedQuantity: quantityInt,
+          closure,
+          actions: refined.actions,
+          unified: refined.unified,
+          prepSteps: best.candidate.prepSteps,
+          targetCraftedOnly,
+          solverFn,
+        });
+        outputUnified = repaired.unified;
+        outputTotalSlotSeconds = best.prepNoYieldSlotSeconds + repaired.unified.totalSlotSeconds;
+        outputUnmetTotal = sumRecordValues(repaired.unified.remainingDemand);
+        refinementNotes.push(...repaired.notes);
+      }
+      if (refined.prunedLaunches > 0) {
+        refinementNotes.push(
+          `Fast mode progression-aware scaling pruned ${refined.prunedLaunches.toLocaleString()} repeated launches after projected ship level gains improved expected drops.`
+        );
+      }
+      outputWeightedScore = normalizedScore(
+        outputUnified.geCost,
+        outputTotalSlotSeconds / 3,
+        priorityTime,
+        Math.max(1, computeGeCostForCrafts(profile, outputUnified.crafts), geRef),
+        Math.max(1, timeRef * scaled.repeatFactor)
+      );
+      refinementNotes.push(
+        `Fast mode large-quantity acceleration solved a representative block of ${solveQuantity.toLocaleString()} and scaled its mission/craft pattern ${scaled.repeatFactor.toLocaleString()}x for the requested ${quantityInt.toLocaleString()}.`
+      );
+      refinementNotes.push(
+        "Fast mode validates scaled shortcuts with exact one-time inventory accounting; when the representative block uses current inventory, residual ingredient demand is repaired with additional launches."
+      );
+      if (outputUnmetTotal > 1e-6) {
+        const unscaledFastResult = await planForTarget(profile, targetItemId, quantityInt, priorityTime, {
+          ...plannerOptions,
+          fastMode: true,
+          disableFastQuantityAcceleration: true,
+          disableNormalFastIncumbent: true,
+        });
+        unscaledFastResult.notes.unshift(
+          "Rejected fast scaled shortcut because the replay still left unmet expected ingredient demand; reran fast mode without quantity scaling."
+        );
+        return unscaledFastResult;
+      }
+    }
+
+    if (outputUnmetTotal <= 1e-6) {
+      const monolithicCombos = chosenCombosForPlan(outputActions, outputUnified.missionCounts);
+      if (monolithicCombos.length > 0) {
+        const fullQuantityCraftSkeleton = getCraftSkeletonCached({
+          profile,
+          targetKey,
+          quantity: quantityInt,
+          closure,
+        });
+        let testedMonolithicCount = 0;
+        let adoptedMonolithicCombo: AvailableCombo | null = null;
+        for (const combo of monolithicCombos) {
+          try {
+            const monolithic = await solveMonolithicIncumbentForCombo(
+              combo,
+              best.candidate,
+              best.prepNoYieldSlotSeconds,
+              fullQuantityCraftSkeleton
+            );
+            if (!monolithic) {
+              continue;
+            }
+            testedMonolithicCount += 1;
+            const currentCandidate = {
+              actions: outputActions,
+              unified: outputUnified,
+              prepNoYieldSlotSeconds: best.prepNoYieldSlotSeconds,
+              totalSlotSeconds: outputTotalSlotSeconds,
+              unmetTotal: outputUnmetTotal,
+              geCost: outputUnified.geCost,
+              totalLaunches: sumRecordValues(outputUnified.missionCounts),
+            };
+            const monolithicCandidate = {
+              actions: monolithic.actions,
+              unified: monolithic.unified,
+              prepNoYieldSlotSeconds: best.prepNoYieldSlotSeconds,
+              totalSlotSeconds: monolithic.totalSlotSeconds,
+              unmetTotal: monolithic.unmetTotal,
+              geCost: monolithic.geCost,
+              totalLaunches: monolithic.totalLaunches,
+            };
+            if (shouldReplaceWithMonolithicIncumbent(currentCandidate, monolithicCandidate)) {
+              outputActions = monolithic.actions;
+              outputUnified = monolithic.unified;
+              outputTotalSlotSeconds = monolithic.totalSlotSeconds;
+              outputWeightedScore = monolithic.weightedScore;
+              outputUnmetTotal = monolithic.unmetTotal;
+              adoptedMonolithicCombo = combo;
+            }
+          } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            solverErrors.push(`monolithic incumbent solve failed: ${details}`);
+          }
+        }
+        if (adoptedMonolithicCombo) {
+          refinementNotes.push(
+            `Monolithic incumbent replaced the mixed plan using ${adoptedMonolithicCombo.ship} ${adoptedMonolithicCombo.durationType} target ${adoptedMonolithicCombo.targetAfxId} because it compared better on the selected GE/time priority.`
+          );
+        } else if (testedMonolithicCount > 0) {
+          refinementNotes.push(
+            `Checked ${testedMonolithicCount.toLocaleString()} monolithic incumbent candidate${testedMonolithicCount === 1 ? "" : "s"} from the mixed plan's chosen ship/target combos; none beat the mixed plan.`
+          );
+        }
+      }
+    }
+
+    const missionRows = buildMissionRows(outputActions, outputUnified.missionCounts);
+    const craftRows = buildCraftRows(outputUnified.crafts);
     const targetBreakdown = buildTargetBreakdown({
       quantity: quantityInt,
       targetKey,
-      crafts: best.unified.crafts,
-      actions: best.actions,
-      missionCounts: best.unified.missionCounts,
-      remainingDemand: best.unified.remainingDemand,
+      crafts: outputUnified.crafts,
+      actions: outputActions,
+      missionCounts: outputUnified.missionCounts,
+      remainingDemand: outputUnified.remainingDemand,
       targetCraftedOnly,
     });
-    const unmetItems = Object.entries(best.unified.remainingDemand)
+    const unmetItems = Object.entries(outputUnified.remainingDemand)
       .filter(([, qty]) => qty > 1e-6)
       .map(([itemKey, qty]) => ({ itemId: itemKeyToId(itemKey), quantity: qty }))
       .sort((a, b) => b.quantity - a.quantity);
 
-    const uncoveredItemKeys = Object.entries(best.unified.remainingDemand)
+    const uncoveredItemKeys = Object.entries(outputUnified.remainingDemand)
       .filter(
         ([itemKey, qty]) =>
           qty > 1e-6 &&
-          !best.actions.some((action) => {
+          !outputActions.some((action) => {
             const yieldPerMission = action.yields[itemKey] || 0;
             return yieldPerMission > 0;
           })
@@ -3845,7 +5168,7 @@ export async function planForTarget(
 
     const compactedPrepLaunches = compactProgressionSteps(best.candidate.prepSteps);
     const prepHours = best.candidate.prepSlotSeconds / 3 / 3600;
-    const notes: string[] = [...best.unified.notes, ...refinementNotes];
+    const notes: string[] = [...outputUnified.notes, ...refinementNotes];
     if (fastMode) {
       notes.push(
         `Fast solve mode enabled: limited progression-state solves to ${progressionCandidates.length.toLocaleString()} candidates.`
@@ -3948,8 +5271,8 @@ export async function planForTarget(
     const projectedShipLevels = projectShipLevelsAfterPlannedLaunches({
       baseShipLevels: profile.shipLevels,
       prepSteps: best.candidate.prepSteps,
-      actions: best.actions,
-      missionCounts: best.unified.missionCounts,
+      actions: outputActions,
+      missionCounts: outputUnified.missionCounts,
     });
 
     reportProgress({
@@ -3962,15 +5285,15 @@ export async function planForTarget(
     await yieldForProgressFlush();
 
     const expectedHours = estimateThreeSlotExpectedHours({
-      actions: best.actions,
-      missionCounts: best.unified.missionCounts,
+      actions: outputActions,
+      missionCounts: outputUnified.missionCounts,
       residualSlotSeconds: best.prepNoYieldSlotSeconds,
     });
 
-    // Build available combos from the best candidate's actions
+    // Build available combos from the selected candidate's actions
     const comboSet = new Set<string>();
     const availableCombos: AvailableCombo[] = [];
-    for (const action of best.actions) {
+    for (const action of outputActions) {
       const comboKey = `${action.ship}|${action.durationType}|${action.targetAfxId}`;
       if (!comboSet.has(comboKey)) {
         comboSet.add(comboKey);
@@ -3986,10 +5309,10 @@ export async function planForTarget(
       targetItemId: itemKeyToId(targetKey),
       quantity: quantityInt,
       priorityTime,
-      geCost: best.unified.geCost,
-      totalSlotSeconds: best.totalSlotSeconds,
+      geCost: outputUnified.geCost,
+      totalSlotSeconds: outputTotalSlotSeconds,
       expectedHours,
-      weightedScore: best.weightedScore,
+      weightedScore: outputWeightedScore,
       crafts: craftRows,
       missions: missionRows,
       unmetItems,
@@ -4002,8 +5325,9 @@ export async function planForTarget(
       notes,
       availableCombos,
     };
-    reportBenchmark(result, "primary");
-    return result;
+    const finalResult = maybeAdoptFastIncumbentResult(result);
+    reportBenchmark(finalResult, "primary");
+    return finalResult;
   } catch (error) {
     if (error instanceof MissionCoverageError) {
       throw error;
@@ -4033,8 +5357,9 @@ export async function planForTarget(
       etaMs: 0,
     });
     await yieldForProgressFlush();
-    reportBenchmark(fallback, "fallback");
-    return fallback;
+    const finalFallback = maybeAdoptFastIncumbentResult(fallback);
+    reportBenchmark(finalFallback, "fallback");
+    return finalFallback;
   }
 }
 

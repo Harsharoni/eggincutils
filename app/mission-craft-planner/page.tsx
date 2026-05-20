@@ -470,6 +470,86 @@ function distributeSecondsAcrossLanes(totalSlotSeconds: number, laneLoads: numbe
   return allocations;
 }
 
+function timelineScheduleRank(segment: TimelineSegment): number {
+  if (segment.launches > 0 && segment.durationSeconds > 0) {
+    return segment.durationSeconds;
+  }
+  return segment.totalSlotSeconds;
+}
+
+function timelinePrecedenceKey(segment: TimelineSegment): string {
+  if (segment.ship && segment.durationType && (segment.phase === "mission" || segment.phase === "prep")) {
+    return `${segment.ship}|${segment.durationType}`;
+  }
+  return segment.id;
+}
+
+function timelineSegmentOrder(a: TimelineSegment, b: TimelineSegment): number {
+  const aPhaseRank = a.phase === "prep" ? 0 : 1;
+  const bPhaseRank = b.phase === "prep" ? 0 : 1;
+  if (aPhaseRank !== bPhaseRank) {
+    return aPhaseRank - bPhaseRank;
+  }
+  const levelDiff = (a.level ?? -1) - (b.level ?? -1);
+  if (levelDiff !== 0) {
+    return levelDiff;
+  }
+  const targetDiff = (a.targetAfxId ?? Number.MAX_SAFE_INTEGER) - (b.targetAfxId ?? Number.MAX_SAFE_INTEGER);
+  if (targetDiff !== 0) {
+    return targetDiff;
+  }
+  const rankDiff = timelineScheduleRank(b) - timelineScheduleRank(a);
+  if (rankDiff !== 0) {
+    return rankDiff;
+  }
+  return a.id.localeCompare(b.id);
+}
+
+function groupTimelineSegmentsForLaneBalance(segments: TimelineSegment[]): TimelineSegment[][] {
+  const groupByKey = new Map<string, TimelineSegment[]>();
+  for (const segment of segments) {
+    const key = timelinePrecedenceKey(segment);
+    const group = groupByKey.get(key) || [];
+    group.push(segment);
+    groupByKey.set(key, group);
+  }
+  return Array.from(groupByKey.values())
+    .map((group) => group.slice().sort(timelineSegmentOrder))
+    .sort((a, b) => {
+      const aRank = Math.max(...a.map(timelineScheduleRank));
+      const bRank = Math.max(...b.map(timelineScheduleRank));
+      const rankDiff = bRank - aRank;
+      if (rankDiff !== 0) {
+        return rankDiff;
+      }
+      const aTotal = a.reduce((sum, segment) => sum + segment.totalSlotSeconds, 0);
+      const bTotal = b.reduce((sum, segment) => sum + segment.totalSlotSeconds, 0);
+      const totalDiff = bTotal - aTotal;
+      if (totalDiff !== 0) {
+        return totalDiff;
+      }
+      return (a[0]?.id || "").localeCompare(b[0]?.id || "");
+    });
+}
+
+function sortTimelineSegmentsForLegend(segments: TimelineSegment[]): TimelineSegment[] {
+  return segments.slice().sort((a, b) => {
+    const keyDiff = timelinePrecedenceKey(a).localeCompare(timelinePrecedenceKey(b));
+    if (keyDiff !== 0) {
+      return keyDiff;
+    }
+    const orderDiff = timelineSegmentOrder(a, b);
+    if (orderDiff !== 0) {
+      return orderDiff;
+    }
+    const rankDiff = timelineScheduleRank(b) - timelineScheduleRank(a);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    return a.id.localeCompare(b.id);
+  });
+}
+
 function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | null {
   const usedMissionPaletteIndexes = new Set<number>();
   const rawMissionSegments: TimelineSegment[] = plan.missions
@@ -621,16 +701,18 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
   const lanes: TimelineLaneBlock[][] = [[], [], []];
   const laneLoads = [0, 0, 0];
 
-  for (const segment of segments) {
+  const scheduleSegment = (segment: TimelineSegment, earliestStartSeconds: number): number => {
+    const effectiveLaneLoads = laneLoads.map((load) => Math.max(load, earliestStartSeconds));
+    let nextPhaseStartSeconds = earliestStartSeconds;
     if (segment.launches > 0 && segment.durationSeconds > 0) {
-      const launchAllocations = distributeLaunchesAcrossLanes(segment.launches, segment.durationSeconds, laneLoads);
+      const launchAllocations = distributeLaunchesAcrossLanes(segment.launches, segment.durationSeconds, effectiveLaneLoads);
       for (let lane = 0; lane < 3; lane += 1) {
         const launches = launchAllocations[lane];
         if (launches <= 0) {
           continue;
         }
         const blockSeconds = launches * segment.durationSeconds;
-        const startSeconds = laneLoads[lane];
+        const startSeconds = effectiveLaneLoads[lane];
         const endSeconds = startSeconds + blockSeconds;
         lanes[lane].push({
           id: `${segment.id}:lane:${lane}`,
@@ -644,17 +726,18 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
           endSeconds,
         });
         laneLoads[lane] = endSeconds;
+        nextPhaseStartSeconds = Math.max(nextPhaseStartSeconds, startSeconds + (launches - 1) * segment.durationSeconds);
       }
-      continue;
+      return nextPhaseStartSeconds;
     }
 
-    const secondAllocations = distributeSecondsAcrossLanes(segment.totalSlotSeconds, laneLoads);
+    const secondAllocations = distributeSecondsAcrossLanes(segment.totalSlotSeconds, effectiveLaneLoads);
     for (let lane = 0; lane < 3; lane += 1) {
       const blockSeconds = secondAllocations[lane];
       if (blockSeconds <= 0) {
         continue;
       }
-      const startSeconds = laneLoads[lane];
+      const startSeconds = effectiveLaneLoads[lane];
       const endSeconds = startSeconds + blockSeconds;
       lanes[lane].push({
         id: `${segment.id}:lane:${lane}`,
@@ -668,6 +751,15 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
         endSeconds,
       });
       laneLoads[lane] = endSeconds;
+      nextPhaseStartSeconds = Math.max(nextPhaseStartSeconds, endSeconds);
+    }
+    return nextPhaseStartSeconds;
+  };
+
+  for (const group of groupTimelineSegmentsForLaneBalance(segments)) {
+    let groupBarrierSeconds = 0;
+    for (const segment of group) {
+      groupBarrierSeconds = scheduleSegment(segment, groupBarrierSeconds);
     }
   }
 
@@ -678,7 +770,7 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
 
   return {
     lanes,
-    segments,
+    segments: sortTimelineSegmentsForLegend(segments),
     totalSeconds,
     modelTotalSlotSeconds,
     missionSlotSeconds,
@@ -1094,7 +1186,7 @@ export default function MissionCraftPlannerPage() {
   }, [targetFilter, targetOptions, targetPickerOpen]);
 
   const missionTimeline = useMemo(() => (response ? buildMissionTimeline(response.plan) : null), [response]);
-  const expectedMissionHours = missionTimeline ? missionTimeline.totalSeconds / 3600 : response?.plan.expectedHours ?? 0;
+  const expectedMissionHours = response?.plan.expectedHours ?? (missionTimeline ? missionTimeline.totalSeconds / 3600 : 0);
   const craftPlanDetailRows = useMemo(() => {
     if (!response) {
       return [] as CraftPlanDetailRow[];
@@ -2577,6 +2669,13 @@ export default function MissionCraftPlannerPage() {
               </span>
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeDropLegendary, setIncludeDropLegendary, "Dropped legendary shiny artifacts")}
+              </span>
+              <span
+                className={`${styles.matrixCell} ${styles.matrixCellMuted}`}
+                title="Dropped slotted stones are not possible"
+                aria-label="Dropped slotted stones are not possible"
+              >
+                -
               </span>
               <span className={styles.matrixCell}>
                 {renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}
