@@ -4,8 +4,12 @@ npm-debug.log*
 .DS_Store
 *.tsbuildinfo
 local_data/
-
+.agents/
+.worktrees/
+    
 # Emacs temp/lock/autosave files
 *~
 \#*\#
 .\#*
+
+*__pycache__/
