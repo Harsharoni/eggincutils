@@ -155,6 +155,7 @@ export async function POST(request: Request): Promise<Response> {
                 fragments: parsedPayload.data.includeDropFragments,
               },
               targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
+              targets: parsedPayload.data.targets,
               allowedShipDurations: parsedPayload.data.allowedShipDurations,
               onProgress: (progress) => {
                 emitProgress({

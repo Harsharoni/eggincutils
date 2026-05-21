@@ -924,6 +924,87 @@ describe("planForTarget coverage handling", () => {
     expect(result.notes.some((note) => note.includes("large-quantity acceleration"))).toBe(true);
   });
 
+  it("scales multi-target fast mode by target quantity GCD", async () => {
+    mockedLoadLootData.mockResolvedValue({
+      missions: [
+        {
+          afxShip: 0,
+          afxDurationType: 0,
+          missionId: "test-short",
+          levels: [
+            {
+              level: 0,
+              targets: [
+                {
+                  totalDrops: 1,
+                  targetAfxId: 10000,
+                  items: [
+                    {
+                      afxId: 1,
+                      afxLevel: 1,
+                      itemId: "puzzle-cube-1",
+                      counts: [1, 0, 0, 0],
+                    },
+                    {
+                      afxId: 7,
+                      afxLevel: 2,
+                      itemId: "vial-martian-dust-2",
+                      counts: [1, 0, 0, 0],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const solvedModels: string[] = [];
+    mockedSolveWithHighs.mockImplementation(async (model) => {
+      solvedModels.push(model);
+      return {
+        Status: "Optimal",
+        Columns: {
+          m_0: { Primal: 1 },
+        },
+      };
+    });
+
+    const profile = baseProfile();
+    profile.missionOptions = [
+      {
+        ship: "CHICKEN_ONE",
+        missionId: "test-short",
+        durationType: "SHORT",
+        level: 0,
+        durationSeconds: 1200,
+        capacity: 1,
+      },
+    ];
+
+    const result = await planForTarget(profile, "puzzle-cube-1", 10, 0.5, {
+      fastMode: true,
+      targets: [
+        { targetItemId: "puzzle-cube-1", quantity: 10 },
+        { targetItemId: "vial-of-martian-dust-2", quantity: 10 },
+      ],
+    });
+
+    expect(result.missions).toHaveLength(1);
+    expect(result.missions[0].launches).toBe(10);
+    expect(result.targetBreakdowns.map((row) => row.requested)).toEqual([10, 10]);
+    expect(
+      solvedModels.some((model) => {
+        const demandLines = model
+          .split("\n")
+          .filter((line) => line.trimStart().startsWith("b_") && line.includes(">= 1"));
+        return demandLines.length >= 2;
+      })
+    ).toBe(true);
+    expect(result.notes.some((note) => note.includes("multi-target acceleration"))).toBe(true);
+  });
+
   it("repairs fast scaled blocks that used one-time ingredient inventory", async () => {
     mockedLoadLootData.mockResolvedValue({
       missions: [

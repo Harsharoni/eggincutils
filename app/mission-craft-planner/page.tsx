@@ -92,6 +92,7 @@ type PlanResponse = {
   plan: {
     targetItemId: string;
     quantity: number;
+    targets: Array<{ targetItemId: string; quantity: number }>;
     priorityTime: number;
     geCost: number;
     totalSlotSeconds: number;
@@ -116,6 +117,14 @@ type PlanResponse = {
       fromMissionsExpected: number;
       shortfall: number;
     };
+    targetBreakdowns: Array<{
+      itemId: string;
+      requested: number;
+      fromInventory: number;
+      fromCraft: number;
+      fromMissionsExpected: number;
+      shortfall: number;
+    }>;
     progression: {
       prepHours: number;
       prepLaunches: Array<{
@@ -160,6 +169,7 @@ type MonolithicPathResult = {
 type SolveSnapshotRequest = {
   targetItemId: string;
   quantity: number;
+  targets?: Array<{ targetItemId: string; quantity: number }>;
   targetCraftedOnly: boolean;
   priorityTime: number;
   fastMode: boolean;
@@ -263,6 +273,12 @@ type TargetOption = {
   tierNumber: number;
   iconUrl: string | null;
   searchText: string;
+};
+
+type PlannerTargetRow = {
+  id: string;
+  itemId: string;
+  quantityInput: string;
 };
 
 type MissionTimeline = {
@@ -913,6 +929,34 @@ function titleCaseShip(ship: string): string {
     .join(" ");
 }
 
+function compactShipName(ship: string): string {
+  const overrides: Record<string, string> = {
+    ATREGGIES: "Henliner",
+    HENERPRISE: "Henerprise",
+    VOYEGGER: "Voyegger",
+    CHICKFIANT: "Defihent",
+    GALEGGTICA: "Galeggtica",
+    CORELLIHEN_CORVETTE: "Corvette",
+    MILLENIUM_CHICKEN: "Quintillion",
+    BCR: "BCR",
+    CHICKEN_HEAVY: "Heavy",
+    CHICKEN_NINE: "Chicken 9",
+    CHICKEN_ONE: "Chicken 1",
+  };
+  return overrides[ship] || titleCaseShip(ship);
+}
+
+function durationChipLabel(durationType: "SHORT" | "LONG" | "EPIC"): string {
+  switch (durationType) {
+    case "SHORT":
+      return "S";
+    case "LONG":
+      return "M";
+    case "EPIC":
+      return "L";
+  }
+}
+
 function itemIdToLabel(itemId: string): string {
   const itemKey = itemIdToKey(itemId);
   const displayInfo = ARTIFACT_DISPLAY[itemKey];
@@ -1071,6 +1115,10 @@ function ShipSelectorImage({ ship, imageFiles }: { ship: string; imageFiles: str
 export default function MissionCraftPlannerPage() {
   const [eid, setEid] = useState("");
   const [targetItemId, setTargetItemId] = useState("soul-stone-2");
+  const [targetRows, setTargetRows] = useState<PlannerTargetRow[]>([
+    { id: "target-1", itemId: "soul-stone-2", quantityInput: "1" },
+  ]);
+  const [activeTargetRowId, setActiveTargetRowId] = useState("target-1");
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
   const [targetFilter, setTargetFilter] = useState("");
   const [targetActiveIndex, setTargetActiveIndex] = useState(0);
@@ -1111,6 +1159,7 @@ export default function MissionCraftPlannerPage() {
   const [lootData, setLootData] = useState<LootJson | null>(null);
   const lootDataRef = useRef<LootJson | null>(null);
   const targetPickerRef = useRef<HTMLDivElement | null>(null);
+  const targetFilterInputRef = useRef<HTMLInputElement | null>(null);
   const highs = useHighsWorker();
   const highsRef = useRef(highs);
   highsRef.current = highs;
@@ -1205,9 +1254,21 @@ export default function MissionCraftPlannerPage() {
         return a.label.localeCompare(b.label);
       });
   }, []);
+  const activeTargetRow = useMemo(
+    () => targetRows.find((row) => row.id === activeTargetRowId) || targetRows[0] || null,
+    [activeTargetRowId, targetRows]
+  );
   const selectedTargetOption = useMemo(
-    () => targetOptions.find((option) => option.itemId === targetItemId) || null,
-    [targetItemId, targetOptions]
+    () => targetOptions.find((option) => option.itemId === (activeTargetRow?.itemId || targetItemId)) || null,
+    [activeTargetRow?.itemId, targetItemId, targetOptions]
+  );
+  const solveTargets = useMemo(
+    () =>
+      targetRows.map((row) => ({
+        targetItemId: row.itemId,
+        quantity: Math.max(1, Math.min(9999, Math.round(Number(row.quantityInput) || 1))),
+      })),
+    [targetRows]
   );
   const filteredTargetOptions = useMemo(() => {
     if (!targetPickerOpen) {
@@ -1234,8 +1295,15 @@ export default function MissionCraftPlannerPage() {
     const recipeMap = recipes as Record<string, { ingredients: Record<string, number> } | null>;
     const requiredByItemKey: Record<string, number> = {};
     const targetKey = itemIdToKey(response.plan.targetItemId);
+    const planTargets = response.plan.targets?.length
+      ? response.plan.targets
+      : [{ targetItemId: response.plan.targetItemId, quantity: response.plan.quantity }];
+    const targetKeys = new Set(planTargets.map((target) => itemIdToKey(target.targetItemId)));
     const planTargetCraftedOnly = Boolean(lastSolveRequest?.targetCraftedOnly);
-    requiredByItemKey[targetKey] = (requiredByItemKey[targetKey] || 0) + response.plan.quantity;
+    for (const target of planTargets) {
+      const key = itemIdToKey(target.targetItemId);
+      requiredByItemKey[key] = (requiredByItemKey[key] || 0) + target.quantity;
+    }
     for (const craft of response.plan.crafts) {
       const craftKey = itemIdToKey(craft.itemId);
       const recipe = recipeMap[craftKey];
@@ -1271,7 +1339,9 @@ export default function MissionCraftPlannerPage() {
       usage.set(consumerKey, (usage.get(consumerKey) || 0) + safeQty);
       neededUsesByItemKey.set(itemKey, usage);
     };
-    addNeededUse(targetKey, "__plan_target__", response.plan.quantity);
+    for (const target of planTargets) {
+      addNeededUse(itemIdToKey(target.targetItemId), "__plan_target__", target.quantity);
+    }
     for (const craft of response.plan.crafts) {
       const craftKey = itemIdToKey(craft.itemId);
       const recipe = recipeMap[craftKey];
@@ -1304,7 +1374,7 @@ export default function MissionCraftPlannerPage() {
         }
         const have = profileSnapshot ? Math.max(0, profileSnapshot.inventory[itemKey] || 0) : null;
         const expectedMission =
-          planTargetCraftedOnly && itemKey === targetKey ? 0 : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
+          planTargetCraftedOnly && targetKeys.has(itemKey) ? 0 : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
         let plannedCraftTooltip: string | null = null;
         if (plannedCraftCount > 0) {
           const recipe = recipeMap[itemKey];
@@ -1514,11 +1584,21 @@ export default function MissionCraftPlannerPage() {
       const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
       if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
         setTargetItemId(savedTarget);
+        setTargetRows((rows) => {
+          const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: savedTarget, quantityInput: "1" }];
+          next[0] = { ...next[0], itemId: savedTarget };
+          return next;
+        });
       }
       const savedQuantity = readStoredInteger([LOCAL_PREF_KEYS.plannerQuantity], 1, 9999);
       if (savedQuantity != null) {
         setQuantity(savedQuantity);
         setQuantityInput(String(savedQuantity));
+        setTargetRows((rows) => {
+          const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: targetItemId, quantityInput: String(savedQuantity) }];
+          next[0] = { ...next[0], quantityInput: String(savedQuantity) };
+          return next;
+        });
       }
       const savedTargetCraftedOnly = readStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly]);
       if (savedTargetCraftedOnly != null) {
@@ -1606,13 +1686,21 @@ export default function MissionCraftPlannerPage() {
     if (!targetPickerOpen) {
       return;
     }
-    const selectedIndex = filteredTargetOptions.findIndex((option) => option.itemId === targetItemId);
+    targetFilterInputRef.current?.focus();
+    targetFilterInputRef.current?.select();
+  }, [targetPickerOpen, activeTargetRowId]);
+
+  useEffect(() => {
+    if (!targetPickerOpen) {
+      return;
+    }
+    const selectedIndex = filteredTargetOptions.findIndex((option) => option.itemId === (activeTargetRow?.itemId || targetItemId));
     if (selectedIndex >= 0) {
       setTargetActiveIndex(selectedIndex);
       return;
     }
     setTargetActiveIndex(filteredTargetOptions.length > 0 ? 0 : -1);
-  }, [filteredTargetOptions, targetItemId, targetPickerOpen]);
+  }, [activeTargetRow?.itemId, filteredTargetOptions, targetItemId, targetPickerOpen]);
 
   useEffect(() => {
     if (!targetPickerOpen || targetActiveIndex < 0) {
@@ -1628,9 +1716,29 @@ export default function MissionCraftPlannerPage() {
     if (!targetPickerOpen) {
       return;
     }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      closeTargetPicker();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [targetPickerOpen, selectedTargetOption]);
+
+  useEffect(() => {
+    if (!targetPickerOpen) {
+      return;
+    }
     const handleMouseDown = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (targetPickerRef.current?.contains(target)) {
+      const activeRowNode = targetPickerRef.current?.querySelector<HTMLElement>(
+        `[data-target-row-id="${activeTargetRowId}"]`
+      );
+      if (activeRowNode?.contains(target)) {
         return;
       }
       setTargetPickerOpen(false);
@@ -1640,7 +1748,7 @@ export default function MissionCraftPlannerPage() {
     return () => {
       window.removeEventListener("mousedown", handleMouseDown);
     };
-  }, [selectedTargetOption, targetPickerOpen]);
+  }, [activeTargetRowId, selectedTargetOption, targetPickerOpen]);
 
   useEffect(() => {
     if (!prefsLoaded) {
@@ -1841,19 +1949,23 @@ export default function MissionCraftPlannerPage() {
   }, [shipDurations, prefsLoaded]);
 
   async function runBuildPlan() {
-    const normalizedQuantity = Math.max(1, Math.min(9999, Math.round(Number(quantityInput) || quantity || 1)));
+    const normalizedTargets = solveTargets.length > 0 ? solveTargets : [{ targetItemId, quantity }];
+    const primaryTarget = normalizedTargets[0];
+    const normalizedQuantity = primaryTarget.quantity;
     const allowedShipDurationsForSolve = shipSelectorSummary.allSelected
       ? undefined
       : shipSelectorSummary.allowed.map((entry) => ({ ...entry }));
     const snapshotRequest: LastSolveInputs = {
-      targetItemId,
+      targetItemId: primaryTarget.targetItemId,
       quantity: normalizedQuantity,
+      targets: normalizedTargets,
       targetCraftedOnly,
       priorityTime: priorityTimePct / 100,
       fastMode,
       allowedShipDurations: allowedShipDurationsForSolve,
       sourceFilters: { ...sourceFilters },
     };
+    setTargetItemId(primaryTarget.targetItemId);
     setQuantity(normalizedQuantity);
     setQuantityInput(String(normalizedQuantity));
 
@@ -1875,7 +1987,7 @@ export default function MissionCraftPlannerPage() {
       writeStoredString(SHARED_EID_KEYS, trimmedEid);
       writeStoredString([LOCAL_PREF_KEYS.plannerInventorySource], inventorySource);
       writeStoredBoolean(SHARED_INCLUDE_SLOTTED_KEYS, includeSlotted);
-      writeStoredString([LOCAL_PREF_KEYS.plannerTargetItemId], targetItemId);
+      writeStoredString([LOCAL_PREF_KEYS.plannerTargetItemId], primaryTarget.targetItemId);
       writeStoredString([LOCAL_PREF_KEYS.plannerQuantity], String(normalizedQuantity));
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly], targetCraftedOnly);
       writeStoredString([LOCAL_PREF_KEYS.plannerPriorityTimePct], String(priorityTimePct));
@@ -1920,7 +2032,7 @@ export default function MissionCraftPlannerPage() {
 
         const result = await planForTarget(
           profile as Parameters<typeof planForTarget>[0],
-          targetItemId,
+          primaryTarget.targetItemId,
           normalizedQuantity,
           priorityTimePct / 100,
           {
@@ -1932,6 +2044,7 @@ export default function MissionCraftPlannerPage() {
               fragments: includeDropFragments,
             },
             targetCraftedOnly,
+            targets: normalizedTargets,
             allowedShipDurations: allowedShipDurationsForSolve,
             solverFn: highsRef.current.solve,
             lootData: lootDataRef.current!,
@@ -1969,7 +2082,8 @@ export default function MissionCraftPlannerPage() {
         // Server-side fallback: stream from /api/plan/stream.
         const requestPayload = {
           eid: trimmedEid,
-          targetItemId,
+          targetItemId: primaryTarget.targetItemId,
+          targets: normalizedTargets,
           quantity: normalizedQuantity,
           priorityTime: priorityTimePct / 100,
           inventorySource,
@@ -2115,7 +2229,13 @@ export default function MissionCraftPlannerPage() {
     setError(null);
     setRefreshSummary(null);
     setRefreshing(true);
-    const normalizedQuantity = Math.max(1, Math.min(9999, Math.round(Number(quantityInput) || quantity || 1)));
+    const normalizedTargets = lastSolveRequest?.targets?.length
+      ? lastSolveRequest.targets
+      : solveTargets.length > 0
+        ? solveTargets
+        : [{ targetItemId, quantity: Math.max(1, Math.min(9999, Math.round(Number(quantityInput) || quantity || 1))) }];
+    const primaryTarget = normalizedTargets[0];
+    const normalizedQuantity = primaryTarget.quantity;
     const allowedShipDurationsForReplan = shipSelectorSummary.allSelected
       ? undefined
       : shipSelectorSummary.allowed.map((entry) => ({ ...entry }));
@@ -2134,7 +2254,8 @@ export default function MissionCraftPlannerPage() {
         },
         body: JSON.stringify({
           profile: liveProfile,
-          targetItemId,
+          targetItemId: primaryTarget.targetItemId,
+          targets: normalizedTargets,
           quantity: normalizedQuantity,
           priorityTime: priorityTimePct / 100,
           targetCraftedOnly,
@@ -2163,8 +2284,9 @@ export default function MissionCraftPlannerPage() {
       setResponse(data);
       setProfileSnapshot(liveProfile);
       setLastSolveRequest({
-        targetItemId,
+        targetItemId: primaryTarget.targetItemId,
         quantity: normalizedQuantity,
+        targets: normalizedTargets,
         priorityTime: priorityTimePct / 100,
         targetCraftedOnly,
         fastMode,
@@ -2190,7 +2312,14 @@ export default function MissionCraftPlannerPage() {
     }
   }
 
-  function openTargetPicker(): void {
+  function openTargetPicker(rowId?: string): void {
+    if (rowId && targetPickerOpen && rowId === activeTargetRowId) {
+      closeTargetPicker();
+      return;
+    }
+    if (rowId) {
+      setActiveTargetRowId(rowId);
+    }
     setTargetPickerOpen(true);
     setTargetFilter("");
   }
@@ -2201,9 +2330,77 @@ export default function MissionCraftPlannerPage() {
   }
 
   function selectTargetOption(option: TargetOption): void {
-    setTargetItemId(option.itemId);
+    setTargetRows((rows) => {
+      const activeId = activeTargetRow?.id || rows[0]?.id || "target-1";
+      const next = rows.map((row) => (row.id === activeId ? { ...row, itemId: option.itemId } : row));
+      if (next[0]) {
+        setTargetItemId(next[0].itemId);
+      }
+      return next.length > 0 ? next : [{ id: activeId, itemId: option.itemId, quantityInput: "1" }];
+    });
     setTargetPickerOpen(false);
     setTargetFilter(option.label);
+  }
+
+  function updateTargetQuantity(rowId: string, rawValue: string): void {
+    setTargetRows((rows) => {
+      const next = rows.map((row) => (row.id === rowId ? { ...row, quantityInput: rawValue } : row));
+      if (next[0]?.id === rowId) {
+        const parsed = Number(rawValue);
+        if (Number.isFinite(parsed)) {
+          const nextQuantity = Math.max(1, Math.min(9999, Math.round(parsed)));
+          setQuantity(nextQuantity);
+          setQuantityInput(String(nextQuantity));
+        }
+      }
+      return next;
+    });
+  }
+
+  function normalizeTargetQuantity(rowId: string): void {
+    setTargetRows((rows) => {
+      const next = rows.map((row) => {
+        if (row.id !== rowId) {
+          return row;
+        }
+        const parsed = Number(row.quantityInput);
+        const quantity = Number.isFinite(parsed) ? Math.max(1, Math.min(9999, Math.round(parsed))) : 1;
+        return { ...row, quantityInput: String(quantity) };
+      });
+      if (next[0]) {
+        const parsed = Number(next[0].quantityInput);
+        const nextQuantity = Number.isFinite(parsed) ? Math.max(1, Math.min(9999, Math.round(parsed))) : 1;
+        setQuantity(nextQuantity);
+        setQuantityInput(String(nextQuantity));
+      }
+      return next;
+    });
+  }
+
+  function addTargetRow(): void {
+    const id = `target-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const itemId = targetRows[targetRows.length - 1]?.itemId || targetItemId;
+    setTargetRows((rows) => [...rows, { id, itemId, quantityInput: "1" }].slice(0, 10));
+    setActiveTargetRowId(id);
+    setTargetPickerOpen(true);
+    setTargetFilter("");
+  }
+
+  function removeTargetRow(rowId: string): void {
+    setTargetRows((rows) => {
+      const next = rows.filter((row) => row.id !== rowId);
+      const safeNext = next.length > 0 ? next : rows;
+      if (safeNext[0]) {
+        setTargetItemId(safeNext[0].itemId);
+        const parsed = Number(safeNext[0].quantityInput);
+        if (Number.isFinite(parsed)) {
+          const nextQuantity = Math.max(1, Math.min(9999, Math.round(parsed)));
+          setQuantity(nextQuantity);
+          setQuantityInput(String(nextQuantity));
+        }
+      }
+      return safeNext;
+    });
   }
 
   function onTargetInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
@@ -2442,406 +2639,405 @@ export default function MissionCraftPlannerPage() {
       </div>
 
       <form
-        className="panel"
+        className={styles.plannerForm}
         onSubmit={(event) => {
           event.preventDefault();
           event.stopPropagation();
           void runBuildPlan();
         }}
       >
-        <div className="row">
-          <div className="field" style={{ minWidth: 320, flex: 2 }}>
-            <label htmlFor="eid">EID</label>
-            <input
-              id="eid"
-              type="text"
-              value={eid}
-              onChange={(event) => setEid(event.target.value)}
-              placeholder="EI123... (leave blank for demo mode)"
-              autoComplete="off"
-            />
-            <div className="muted" style={{ fontSize: 12 }}>
-              Enter your EID for personalized plans, or leave blank to run a demo profile.
-            </div>
-          </div>
-
-          <div className="field" style={{ minWidth: 280, flex: 2 }} ref={targetPickerRef}>
-            <label htmlFor="targetItemFilter">Target artifact/stone</label>
-            <div className={styles.targetPicker}>
-              <div className={styles.targetPickerIconWrap}>
-                {selectedTargetOption?.iconUrl ? (
-                  <img
-                    src={selectedTargetOption.iconUrl}
-                    alt=""
-                    width={22}
-                    height={22}
-                    className={styles.targetPickerIcon}
-                    loading="lazy"
+        <div className={styles.plannerControlGrid}>
+          <div className={styles.controlColumn}>
+            <div className={`${styles.controlCard} ${styles.profileCard}`}>
+              <div className={styles.profileRow}>
+                <div className={styles.fieldBlock}>
+                  <label className={styles.fieldLabel} htmlFor="eid">EID</label>
+                  <input
+                    id="eid"
+                    className={styles.textInput}
+                    type="text"
+                    value={eid}
+                    onChange={(event) => setEid(event.target.value)}
+                    placeholder="EI123... (blank for demo)"
+                    autoComplete="off"
                   />
-                ) : (
-                  <span className={styles.targetPickerFallbackIcon} aria-hidden="true">
-                    ?
-                  </span>
-                )}
+                </div>
+                <div className={styles.fieldBlock}>
+                  <label className={styles.fieldLabel} htmlFor="planner-inventory-source">Inventory source</label>
+                  <div className={styles.selectWrap}>
+                    <select
+                      id="planner-inventory-source"
+                      className={styles.selectInput}
+                      value={inventorySource}
+                      onChange={(event) => setInventorySource(event.target.value as InventorySource)}
+                    >
+                      <option value="main">Main farm</option>
+                      <option value="virtue">Path of Virtue</option>
+                    </select>
+                  </div>
+                </div>
               </div>
-              <input
-                id="targetItemFilter"
-                type="text"
-                value={targetFilter}
-                onFocus={openTargetPicker}
-                onChange={(event) => {
-                  if (!targetPickerOpen) {
-                    setTargetPickerOpen(true);
-                  }
-                  setTargetFilter(event.target.value);
-                }}
-                onKeyDown={onTargetInputKeyDown}
-                placeholder="Select artifact (type to filter)"
-                autoComplete="off"
-                className={styles.targetPickerInput}
-                role="combobox"
-                aria-expanded={targetPickerOpen}
-                aria-controls="targetItemDropdown"
-              />
-              <span className={styles.targetPickerChevron} aria-hidden="true">
-                ▾
-              </span>
-              {targetPickerOpen && (
-                <ul id="targetItemDropdown" className={styles.targetPickerDropdown} role="listbox">
-                  {filteredTargetOptions.length === 0 ? (
-                    <li className={styles.targetPickerEmpty}>No match</li>
-                  ) : (
-                    filteredTargetOptions.map((option, index) => {
-                      const selected = option.itemId === targetItemId;
-                      const active = index === targetActiveIndex;
-                      return (
-                        <li
-                          key={option.itemId}
-                          data-target-option-index={index}
-                          className={styles.targetPickerOption}
-                          data-active={active ? "1" : "0"}
-                          data-selected={selected ? "1" : "0"}
-                          role="option"
-                          aria-selected={selected}
-                          onMouseDown={(event) => {
-                            event.preventDefault();
-                            selectTargetOption(option);
-                          }}
-                          onMouseEnter={() => setTargetActiveIndex(index)}
-                        >
-                          {option.iconUrl ? (
-                            <img
-                              src={option.iconUrl}
-                              alt=""
-                              width={22}
-                              height={22}
-                              className={styles.targetPickerOptionIcon}
-                              loading="lazy"
-                            />
-                          ) : (
-                            <span className={styles.targetPickerFallbackIcon} aria-hidden="true">
-                              ?
+              <div className={styles.helpText}>
+                Enter your EID for personalized plans, or leave blank to run a demo profile.
+              </div>
+            </div>
+
+            <div className={`${styles.controlCard} ${styles.tightControlCard}`}>
+              <div className={styles.controlCardHeader}>
+                <div className={styles.controlCardTitle}>
+                  <span className={styles.titleDot} aria-hidden="true" />
+                  Ingredient sources
+                </div>
+                <div className={styles.cardSub}>Use = included in planning. Skip = excluded.</div>
+              </div>
+              <div className={styles.sourceMatrix} role="group" aria-label="Ingredient source filters">
+                <span className={styles.matrixSpacer} aria-hidden="true" />
+                <span className={`${styles.matrixHeader} ${styles.matrixHeaderRare}`} title="Rare shiny">R</span>
+                <span className={`${styles.matrixHeader} ${styles.matrixHeaderEpic}`} title="Epic shiny">E</span>
+                <span className={`${styles.matrixHeader} ${styles.matrixHeaderLegendary}`} title="Legendary shiny">L</span>
+                <span className={styles.matrixHeader} title="Slotted stones">Slotted</span>
+                <span className={styles.matrixHeader} title="Stone fragments">Fragments</span>
+
+                <span className={styles.matrixRowLabel}>Inventory</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeInventoryRare, setIncludeInventoryRare, "Inventory rare shiny artifacts")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeInventoryEpic, setIncludeInventoryEpic, "Inventory epic shiny artifacts")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeInventoryLegendary, setIncludeInventoryLegendary, "Inventory legendary shiny artifacts")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeSlotted, setIncludeSlotted, "Inventory slotted stones")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeInventoryFragments, setIncludeInventoryFragments, "Inventory stone fragments")}</span>
+
+                <span className={styles.matrixRowLabel}>Dropped</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeDropRare, setIncludeDropRare, "Dropped rare shiny artifacts")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeDropEpic, setIncludeDropEpic, "Dropped epic shiny artifacts")}</span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeDropLegendary, setIncludeDropLegendary, "Dropped legendary shiny artifacts")}</span>
+                <span
+                  className={`${styles.matrixCell} ${styles.matrixCellMuted}`}
+                  title="Dropped slotted stones are not possible"
+                  aria-label="Dropped slotted stones are not possible"
+                >
+                  -
+                </span>
+                <span className={styles.matrixCell}>{renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}</span>
+              </div>
+            </div>
+
+            <div className={styles.shipSelectorWrap}>
+              <button
+                type="button"
+                className={styles.shipSelectorToggle}
+                onClick={() => setShipSelectorOpen((prev) => !prev)}
+              >
+                <span className={styles.shipSelectorToggleLeft}>
+                  <span className={styles.shipSelectorChevron} data-open={shipSelectorOpen ? "1" : "0"} />
+                  <span>Ships</span>
+                </span>
+                <span className={styles.shipSelectorCount}>
+                  {shipSelectorSummary.selectedShips} / {shipSelectorSummary.totalShips} <em>selected</em>
+                </span>
+              </button>
+
+              {!shipSelectorOpen && (
+                <div className={styles.shipChips} aria-label="Selected ship durations">
+                  {SHIP_DISPLAY_CONFIG.map((entry) => {
+                    const dur = shipDurations[entry.ship] || { SHORT: true, LONG: true, EPIC: true };
+                    const selectedDurations = SHIP_SELECTOR_DURATIONS.filter((duration) => dur[duration.key]);
+                    if (selectedDurations.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <span key={entry.ship} className={styles.shipChip}>
+                        {compactShipName(entry.ship)}
+                        <span className={styles.shipChipDurations}>
+                          {selectedDurations.map((duration) => (
+                            <span key={duration.key} className={styles[`shipChip${duration.key}`]}>
+                              {durationChipLabel(duration.key)}
                             </span>
-                          )}
-                          <span className={styles.targetPickerOptionLabel}>{option.label}</span>
-                          {selected && <span className={styles.targetPickerCheck}>✓</span>}
-                        </li>
+                          ))}
+                        </span>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              {shipSelectorOpen && (
+                <div className={styles.shipSelectorPanel}>
+                  <div className={styles.shipSelectorActions}>
+                    <button
+                      type="button"
+                      onClick={() => setShipDurations(buildDefaultShipDurations())}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cleared: ShipDurationSelection = {};
+                        for (const entry of SHIP_DISPLAY_CONFIG) {
+                          cleared[entry.ship] = { SHORT: false, LONG: false, EPIC: false };
+                        }
+                        setShipDurations(cleared);
+                      }}
+                    >
+                      Deselect all
+                    </button>
+                  </div>
+                  <div className={styles.shipSelectorList}>
+                    {SHIP_DISPLAY_CONFIG.map((entry) => {
+                      const dur = shipDurations[entry.ship] || { SHORT: true, LONG: true, EPIC: true };
+                      const shipLevel = profileSnapshot?.shipLevels?.find(
+                        (sl: ShipLevelInfo) => sl.ship === entry.ship
                       );
-                    })
-                  )}
-                </ul>
+                      return (
+                        <div key={entry.ship} className={styles.shipSelectorRow}>
+                          <ShipSelectorImage ship={entry.ship} imageFiles={entry.imageFiles} />
+                          <div className={styles.shipSelectorNameBlock}>
+                            <div className={styles.shipSelectorName}>{compactShipName(entry.ship)}</div>
+                            {shipLevel != null && (
+                              <div className={styles.shipSelectorStars}>
+                                {shipLevel.level}/{shipLevel.maxLevel} ⭐
+                              </div>
+                            )}
+                          </div>
+                          <div className={styles.shipSelectorDurations}>
+                            {SHIP_SELECTOR_DURATIONS.map((d) => (
+                              <label
+                                key={d.key}
+                                className={`${styles.shipSelectorDurLabel} ${
+                                  d.key === "SHORT"
+                                    ? styles.shipSelectorDurShort
+                                    : d.key === "LONG"
+                                      ? styles.shipSelectorDurStandard
+                                      : styles.shipSelectorDurExtended
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={dur[d.key]}
+                                  onChange={() => {
+                                    setShipDurations((prev) => ({
+                                      ...prev,
+                                      [entry.ship]: {
+                                        ...prev[entry.ship],
+                                        [d.key]: !prev[entry.ship][d.key],
+                                      },
+                                    }));
+                                  }}
+                                />
+                                <span>{durationChipLabel(d.key)}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
             </div>
           </div>
 
-          <div className="field" style={{ minWidth: 120 }}>
-            <label htmlFor="quantity">Quantity</label>
-            <input
-              id="quantity"
-              type="number"
-              min={1}
-              max={9999}
-              value={quantityInput}
-              onChange={(event) => {
-                const nextRaw = event.target.value;
-                if (nextRaw === "") {
-                  setQuantityInput("");
-                  return;
-                }
-                const parsed = Number(nextRaw);
-                if (!Number.isFinite(parsed)) {
-                  return;
-                }
-                const nextQuantity = Math.max(1, Math.min(9999, Math.round(parsed)));
-                setQuantity(nextQuantity);
-                setQuantityInput(String(nextQuantity));
-              }}
-              onBlur={() => {
-                if (quantityInput.trim() === "") {
-                  setQuantityInput(String(quantity));
-                  return;
-                }
-                const parsed = Number(quantityInput);
-                const nextQuantity = Number.isFinite(parsed) ? Math.max(1, Math.min(9999, Math.round(parsed))) : quantity;
-                setQuantity(nextQuantity);
-                setQuantityInput(String(nextQuantity));
-              }}
-            />
-            <label className={styles.quantityOption} htmlFor="targetCraftedOnly">
-              <input
-                id="targetCraftedOnly"
-                type="checkbox"
-                checked={targetCraftedOnly}
-                onChange={(event) => setTargetCraftedOnly(event.target.checked)}
-              />
-              <span
-                className={styles.tooltipValue}
-                title="Only count copies you craft toward the requested target quantity. Mission drops can still supply ingredients, but target drops themselves are ignored because high-rarity drop odds can be very low."
-              >
-                Only crafted
-              </span>
-            </label>
-          </div>
-        </div>
-
-        {showDemoNotice && (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid var(--stroke)",
-              background: "color-mix(in oklab, var(--panel), var(--accent) 8%)",
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: 12,
-            }}
-          >
-            <div className="muted" style={{ fontSize: 13 }}>
-              Demo mode is active. This runs with an empty inventory, maxed research, and all ships unlocked at 0 stars to show
-              how the planner works. For customized advice, enter your EID.
+          <div className={styles.controlColumn}>
+            <div className={styles.controlCard} ref={targetPickerRef}>
+              <div className={styles.controlCardHeader}>
+                <div className={styles.controlCardTitle}>
+                  <span className={styles.titleDot} aria-hidden="true" />
+                  Targets
+                </div>
+                <label className={styles.customCheck} htmlFor="targetCraftedOnly">
+                  <input
+                    id="targetCraftedOnly"
+                    type="checkbox"
+                    checked={targetCraftedOnly}
+                    onChange={(event) => setTargetCraftedOnly(event.target.checked)}
+                  />
+                  <span aria-hidden="true" />
+                  <span
+                    className={styles.tooltipValue}
+                    title="Only count copies you craft toward requested target quantities. Mission drops can still supply ingredients, but requested target drops themselves are ignored."
+                  >
+                    Only crafted
+                  </span>
+                </label>
+              </div>
+              <div className={styles.targetRows}>
+                {targetRows.map((row, rowIndex) => {
+                  const option = targetOptions.find((candidate) => candidate.itemId === row.itemId) || null;
+                  const rowActive = row.id === activeTargetRowId;
+                  return (
+                    <div key={row.id} className={styles.targetRow} data-target-row-id={row.id}>
+                      <span className={styles.targetIcon} aria-hidden="true">
+                        {option?.iconUrl ? (
+                          <img src={option.iconUrl} alt="" width={32} height={32} loading="lazy" />
+                        ) : (
+                          <span className={styles.targetPickerFallbackIcon}>?</span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className={styles.targetRowSelect}
+                        onClick={() => openTargetPicker(row.id)}
+                      >
+                        <span>{option?.label || row.itemId}</span>
+                        <span className={styles.targetPickerChevron} aria-hidden="true" />
+                      </button>
+                      <div className={styles.targetStepper}>
+                        <button
+                          type="button"
+                          aria-label={`Decrease ${option?.label || "target"} quantity`}
+                          onClick={() => updateTargetQuantity(row.id, String(Math.max(1, (Number(row.quantityInput) || 1) - 1)))}
+                        >
+                          -
+                        </button>
+                        <input
+                          aria-label={`${option?.label || "Target"} quantity`}
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          value={row.quantityInput}
+                          onChange={(event) => updateTargetQuantity(row.id, event.target.value)}
+                          onBlur={() => normalizeTargetQuantity(row.id)}
+                        />
+                        <button
+                          type="button"
+                          aria-label={`Increase ${option?.label || "target"} quantity`}
+                          onClick={() => updateTargetQuantity(row.id, String(Math.min(9999, (Number(row.quantityInput) || 1) + 1)))}
+                        >
+                          +
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.targetRemove}
+                        onClick={() => removeTargetRow(row.id)}
+                        disabled={targetRows.length <= 1}
+                        aria-label={`Remove target ${rowIndex + 1}`}
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                          <path d="M4.25 4.25 11.75 11.75M11.75 4.25 4.25 11.75" />
+                        </svg>
+                      </button>
+                      {targetPickerOpen && rowActive && (
+                        <div className={styles.targetRowDropdown}>
+                          <div className={styles.targetPicker}>
+                            <input
+                              ref={targetFilterInputRef}
+                              id="targetItemFilter"
+                              type="text"
+                              value={targetFilter}
+                              onChange={(event) => setTargetFilter(event.target.value)}
+                              onKeyDown={onTargetInputKeyDown}
+                              placeholder="Filter artifacts"
+                              autoComplete="off"
+                              className={styles.targetPickerInput}
+                              role="combobox"
+                              aria-expanded={targetPickerOpen}
+                              aria-controls="targetItemDropdown"
+                            />
+                          </div>
+                          <ul id="targetItemDropdown" className={styles.targetPickerDropdown} role="listbox">
+                            {filteredTargetOptions.length === 0 ? (
+                              <li className={styles.targetPickerEmpty}>No match</li>
+                            ) : (
+                              filteredTargetOptions.map((optionRow, index) => {
+                                const selected = optionRow.itemId === row.itemId;
+                                const active = index === targetActiveIndex;
+                                return (
+                                  <li
+                                    key={optionRow.itemId}
+                                    data-target-option-index={index}
+                                    className={styles.targetPickerOption}
+                                    data-active={active ? "1" : "0"}
+                                    data-selected={selected ? "1" : "0"}
+                                    role="option"
+                                    aria-selected={selected}
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      selectTargetOption(optionRow);
+                                    }}
+                                    onMouseEnter={() => setTargetActiveIndex(index)}
+                                  >
+                                    {optionRow.iconUrl ? (
+                                      <img src={optionRow.iconUrl} alt="" width={22} height={22} className={styles.targetPickerOptionIcon} loading="lazy" />
+                                    ) : (
+                                      <span className={styles.targetPickerFallbackIcon} aria-hidden="true">?</span>
+                                    )}
+                                    <span className={styles.targetPickerOptionLabel}>{optionRow.label}</span>
+                                    {selected && <span className={styles.targetPickerCheck}>✓</span>}
+                                  </li>
+                                );
+                              })
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <button type="button" className={styles.addTargetButton} onClick={addTargetRow} disabled={targetRows.length >= 10}>
+                  <span aria-hidden="true">+</span>
+                  Add target
+                </button>
+              </div>
             </div>
-            <button type="button" onClick={() => setDemoNoticeDismissed(true)} style={{ whiteSpace: "nowrap" }}>
-              Dismiss
-            </button>
-          </div>
-        )}
 
-        <div className="row" style={{ marginTop: 20, alignItems: "stretch" }}>
-
-          <div className={`field ${styles.sourceMatrixField}`} style={{ minWidth: 340, flex: 1 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: 16 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-                <label>Ingredient sources</label>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  Use = included in planning. Skip = excluded.
+            <div className={styles.buildCard}>
+              <div className={styles.sliderBlock}>
+                <div className={styles.sliderWrap} style={{ "--pct": `${priorityTimePct}%` } as CSSProperties}>
+                  <input
+                    id="priority"
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={priorityTimePct}
+                    onChange={(event) => setPriorityTimePct(Number(event.target.value))}
+                    aria-label="Optimization priority"
+                  />
+                </div>
+                <div className={styles.sliderLabels}>
+                  <span>Save GE</span>
+                  <b>Balance</b>
+                  <span>Save time</span>
                 </div>
               </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                <label htmlFor="planner-inventory-source">Inventory source</label>
-                <select
-                  id="planner-inventory-source"
-                  value={inventorySource}
-                  onChange={(event) => setInventorySource(event.target.value as InventorySource)}
-                  style={{ marginBottom: 8 }}
-                >
-                  <option value="main">Main farm</option>
-                  <option value="virtue">Path of Virtue</option>
-                </select>
-              </div>
-            </div>    
-            <div className={styles.sourceMatrix} role="group" aria-label="Ingredient source filters">
-              <span className={styles.matrixSpacer} aria-hidden="true" />
-              <span className={`${styles.matrixHeader} ${styles.matrixHeaderRare}`} title="Rare shiny">
-                R
-              </span>
-              <span className={`${styles.matrixHeader} ${styles.matrixHeaderEpic}`} title="Epic shiny">
-                E
-              </span>
-              <span className={`${styles.matrixHeader} ${styles.matrixHeaderLegendary}`} title="Legendary shiny">
-                L
-              </span>
-              <span className={styles.matrixHeader} title="Slotted stones">
-                Slotted
-              </span>
-              <span className={styles.matrixHeader} title="Stone fragments">
-                Fragments
-              </span>
-
-              <span className={styles.matrixRowLabel}>Inventory</span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(
-                  includeInventoryRare,
-                  setIncludeInventoryRare,
-                  "Inventory rare shiny artifacts"
-                )}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(
-                  includeInventoryEpic,
-                  setIncludeInventoryEpic,
-                  "Inventory epic shiny artifacts"
-                )}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(
-                  includeInventoryLegendary,
-                  setIncludeInventoryLegendary,
-                  "Inventory legendary shiny artifacts"
-                )}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeSlotted, setIncludeSlotted, "Inventory slotted stones")}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeInventoryFragments, setIncludeInventoryFragments, "Inventory stone fragments")}
-              </span>
-
-              <span className={styles.matrixRowLabel}>Dropped</span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeDropRare, setIncludeDropRare, "Dropped rare shiny artifacts")}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeDropEpic, setIncludeDropEpic, "Dropped epic shiny artifacts")}
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeDropLegendary, setIncludeDropLegendary, "Dropped legendary shiny artifacts")}
-              </span>
-              <span
-                className={`${styles.matrixCell} ${styles.matrixCellMuted}`}
-                title="Dropped slotted stones are not possible"
-                aria-label="Dropped slotted stones are not possible"
-              >
-                -
-              </span>
-              <span className={styles.matrixCell}>
-                {renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}
-              </span>
-            </div>
-          </div>
-
-          <div className={styles.actionColumn}>
-            <div className={styles.buildActionStack}>
-              <button type="submit" disabled={loading}>
-                {loading ? "Planning..." : "Build plan"}
-              </button>
-              <div className="field" style={{ minWidth: 340, flex: 1 }}>
-                <label htmlFor="priority">Optimization priority ({priorityTimePct}% time / {100 - priorityTimePct}% GE)</label>
-                <input
-                  id="priority"
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={priorityTimePct}
-                  onChange={(event) => setPriorityTimePct(Number(event.target.value))}
-                />
-              </div>
-
-              <label className={styles.fastModeToggle} htmlFor="fastMode">
+              <label className={styles.customCheck} htmlFor="fastMode">
                 <input
                   id="fastMode"
                   type="checkbox"
                   checked={fastMode}
                   onChange={(event) => setFastMode(event.target.checked)}
                 />
-                <span className="muted">Faster, less optimal solve</span>
+                <span aria-hidden="true" />
+                <span>Faster, less optimal solve</span>
               </label>
+              <button type="submit" className={styles.buildButton} disabled={loading}>
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M8.9 1.25 3.6 8.45h3.55l-.05 6.3 5.3-7.2H8.85l.05-6.3Z" />
+                </svg>
+                {loading ? "Planning..." : "Build plan"}
+              </button>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                disabled={loading || refreshing || !response || isDemoMode}
+                onClick={onRefreshFromLive}
+              >
+                {refreshing ? "Replanning..." : "Replan after ship returns"}
+              </button>
             </div>
-            <button type="button" disabled={loading || refreshing || !response || isDemoMode} onClick={onRefreshFromLive}>
-              {refreshing ? "Replanning..." : "Replan after ship returns"}
-            </button>
           </div>
         </div>
 
-        <div className={styles.shipSelectorWrap}>
-          <button
-            type="button"
-            className={styles.shipSelectorToggle}
-            onClick={() => setShipSelectorOpen((prev) => !prev)}
-          >
-            <span className={styles.shipSelectorChevron} data-open={shipSelectorOpen ? "1" : "0"}>
-              &#x25B6;
-            </span>
-            {shipSelectorSummary.selectedShips} / {shipSelectorSummary.totalShips} ships selected
-          </button>
-
-          {shipSelectorOpen && (
-            <div className={styles.shipSelectorPanel}>
-              <div className={styles.shipSelectorActions}>
-                <button
-                  type="button"
-                  onClick={() => setShipDurations(buildDefaultShipDurations())}
-                >
-                  Select all
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const cleared: ShipDurationSelection = {};
-                    for (const entry of SHIP_DISPLAY_CONFIG) {
-                      cleared[entry.ship] = { SHORT: false, LONG: false, EPIC: false };
-                    }
-                    setShipDurations(cleared);
-                  }}
-                >
-                  Deselect all
-                </button>
-              </div>
-              <div className={styles.shipSelectorList}>
-                {SHIP_DISPLAY_CONFIG.map((entry) => {
-                  const dur = shipDurations[entry.ship] || { SHORT: true, LONG: true, EPIC: true };
-                  const shipLevel = profileSnapshot?.shipLevels?.find(
-                    (sl: ShipLevelInfo) => sl.ship === entry.ship
-                  );
-                  return (
-                    <div key={entry.ship} className={styles.shipSelectorRow}>
-                      <ShipSelectorImage ship={entry.ship} imageFiles={entry.imageFiles} />
-                      <div className={styles.shipSelectorNameBlock}>
-                        <div className={styles.shipSelectorName}>{titleCaseShip(entry.ship)}</div>
-                        {shipLevel != null && (
-                          <div className={styles.shipSelectorStars}>
-                            {shipLevel.level}/{shipLevel.maxLevel} ⭐
-                          </div>
-                        )}
-                      </div>
-                      <div className={styles.shipSelectorDurations}>
-                        {SHIP_SELECTOR_DURATIONS.map((d) => (
-                          <label
-                            key={d.key}
-                            className={`${styles.shipSelectorDurLabel} ${
-                              d.key === "SHORT"
-                                ? styles.shipSelectorDurShort
-                                : d.key === "LONG"
-                                  ? styles.shipSelectorDurStandard
-                                  : styles.shipSelectorDurExtended
-                            }`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={dur[d.key]}
-                              onChange={() => {
-                                setShipDurations((prev) => ({
-                                  ...prev,
-                                  [entry.ship]: {
-                                    ...prev[entry.ship],
-                                    [d.key]: !prev[entry.ship][d.key],
-                                  },
-                                }));
-                              }}
-                            />
-                            {d.label}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+        {showDemoNotice && (
+          <div className={styles.demoNotice}>
+            <div>
+              Demo mode is active. This runs with an empty inventory, maxed research, and all ships unlocked at 0 stars to show
+              how the planner works. For customized advice, enter your EID.
             </div>
-          )}
-        </div>
+            <button type="button" onClick={() => setDemoNoticeDismissed(true)}>
+              Dismiss
+            </button>
+          </div>
+        )}
       </form>
 
       {loading && plannerProgress && (

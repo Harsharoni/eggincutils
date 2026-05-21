@@ -124,7 +124,6 @@ const MAX_DISCOUNT_FACTOR = 0.9;
 const DISCOUNT_CURVE_EXPONENT = 0.2;
 const CRAFTING_SALE_FACTOR = 0.7;
 const ZERO_TOLERANCE = 1e-9;
-const MANUAL_LIMIT_BIG_M = 1_000_000;
 const HIGHS_SOLVE_OPTIONS = {
   presolve: "on",
 };
@@ -956,7 +955,7 @@ function getProblem(inventory: Inventory, craftLimits: CraftLimits = {}): string
     }
   }
   for (const [artifact, limit] of cappedArtifacts) {
-    addManualLimitConstraints(lines, recipes, inventory, artifact, limit);
+    lines.push(`  craft_limit_${artifact}: ${artifact} <= ${limit}`);
   }
 
   lines.push("Bounds");
@@ -966,41 +965,9 @@ function getProblem(inventory: Inventory, craftLimits: CraftLimits = {}): string
 
   lines.push("General");
   lines.push(`  ${artifacts.join(" ")}`);
-  if (cappedArtifacts.length > 0) {
-    lines.push("Binary");
-    lines.push(`  ${cappedArtifacts.map(([artifact]) => manualLimitBinaryVar(artifact)).join(" ")}`);
-  }
   lines.push("End");
 
   return lines.join("\n");
-}
-
-function manualLimitBinaryVar(artifact: string): string {
-  return `manual_limit_branch_${artifact}`;
-}
-
-function addManualLimitConstraints(
-  lines: string[],
-  recipeMap: Recipes,
-  inventory: Inventory,
-  artifact: string,
-  limit: number
-): void {
-  const demandTerms = getDemandTerms(recipeMap, artifact);
-  const demandExpr = demandTerms.length > 0 ? demandTerms.join(" + ") : "0";
-  const available = Math.max(0, Math.round(inventory[artifact] || 0));
-  const branchVar = manualLimitBinaryVar(artifact);
-  const safeLimit = Math.max(0, Math.round(limit));
-  const prefix = `ml_${artifact}`;
-
-  lines.push(`  ${prefix}_branch_hi: ${demandExpr} - ${MANUAL_LIMIT_BIG_M} ${branchVar} <= ${available}`);
-  lines.push(`  ${prefix}_branch_lo: ${demandExpr} - ${MANUAL_LIMIT_BIG_M} ${branchVar} >= ${available - MANUAL_LIMIT_BIG_M}`);
-  lines.push(
-    `  ${prefix}_cap_under_inventory: ${artifact} - ${MANUAL_LIMIT_BIG_M} ${branchVar} <= ${safeLimit}`
-  );
-  lines.push(
-    `  ${prefix}_cap_over_inventory: ${artifact} - ${demandExpr} + ${MANUAL_LIMIT_BIG_M} ${branchVar} <= ${MANUAL_LIMIT_BIG_M + safeLimit - available}`
-  );
 }
 
 function getObjective(recipeMap: Recipes, artifacts: string[]): string {

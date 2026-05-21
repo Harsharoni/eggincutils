@@ -110,8 +110,8 @@ describe("buildMaxXpExecutionPlan", () => {
   });
 });
 
-describe("optimizeCrafts manual limits", () => {
-  it("adds manual craft cap constraints without hard-capping total crafts", () => {
+describe("optimizeCrafts craft limits", () => {
+  it("adds all-craft cap constraints directly to solver variables", () => {
     let capturedProblem = "";
     const highs: Highs = {
       solve(problem) {
@@ -122,10 +122,7 @@ describe("optimizeCrafts manual limits", () => {
 
     optimizeCrafts(highs, { tachyon_deflector_3: 49 }, {}, false, { tachyon_deflector_3: 0 });
 
-    expect(capturedProblem).toContain("Binary");
-    expect(capturedProblem).toContain("manual_limit_branch_tachyon_deflector_3");
-    expect(capturedProblem).toContain("ml_tachyon_deflector_3_cap_under_inventory");
-    expect(capturedProblem).toContain("ml_tachyon_deflector_3_cap_over_inventory");
-    expect(capturedProblem).not.toMatch(/\n\s+tachyon_deflector_3 <= 0/);
+    expect(capturedProblem).toContain("craft_limit_tachyon_deflector_3: tachyon_deflector_3 <= 0");
+    expect(capturedProblem).not.toContain("Binary");
   });
 });

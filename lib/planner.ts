@@ -81,6 +81,15 @@ type TargetBreakdown = {
   shortfall: number;
 };
 
+export type PlannerTarget = {
+  targetItemId: string;
+  quantity: number;
+};
+
+type TargetBreakdownRow = TargetBreakdown & {
+  itemId: string;
+};
+
 type ShinyRaritySelection = {
   rare: boolean;
   epic: boolean;
@@ -97,6 +106,7 @@ export type AvailableCombo = {
 export type PlannerResult = {
   targetItemId: string;
   quantity: number;
+  targets: PlannerTarget[];
   priorityTime: number;
   geCost: number;
   totalSlotSeconds: number;
@@ -106,6 +116,7 @@ export type PlannerResult = {
   missions: PlanMissionRow[];
   unmetItems: Array<{ itemId: string; quantity: number }>;
   targetBreakdown: TargetBreakdown;
+  targetBreakdowns: TargetBreakdownRow[];
   progression: {
     prepHours: number;
     prepLaunches: ProgressionLaunchRow[];
@@ -121,6 +132,7 @@ export type SolverFunction = (
 ) => Promise<HighsSolveResult>;
 
 export type PlannerOptions = {
+  targets?: PlannerTarget[];
   fastMode?: boolean;
   targetCraftedOnly?: boolean;
   missionDropRarities?: Partial<ShinyRaritySelection>;
@@ -481,6 +493,14 @@ function estimateCraftUpperBounds(targetKey: string, quantity: number): Record<s
   return totals;
 }
 
+function estimateCraftUpperBoundsForTargets(targetDemandByItem: Map<string, number>): Record<string, number> {
+  const totals: Record<string, number> = {};
+  for (const [targetKey, quantity] of targetDemandByItem.entries()) {
+    collectCraftUpperBounds(targetKey, Math.max(0, Math.round(quantity)), totals);
+  }
+  return totals;
+}
+
 function getBatchDiscountedCost(baseCost: number, initialCraftCount: number, craftsToAdd: number): number {
   const safeCount = Math.max(0, Math.round(craftsToAdd));
   if (safeCount <= 0 || baseCost <= 0) {
@@ -673,10 +693,14 @@ function computeObjectiveReferences(options: {
   targetKey: string;
   quantity: number;
   actions: MissionAction[];
+  targetDemandByItem?: Map<string, number>;
 }): { geRef: number; timeRef: number } {
   const { profile, targetKey, quantity, actions } = options;
   const quantityInt = Math.max(1, Math.round(quantity));
-  const craftUpperBounds = estimateCraftUpperBounds(targetKey, quantityInt);
+  const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
+    ? options.targetDemandByItem
+    : new Map([[targetKey, quantityInt]]);
+  const craftUpperBounds = estimateCraftUpperBoundsForTargets(targetDemandByItem);
 
   let geUpperBound = 0;
   for (const [itemKey, craftCount] of Object.entries(craftUpperBounds)) {
@@ -690,10 +714,24 @@ function computeObjectiveReferences(options: {
       Math.max(0, Math.ceil(craftCount))
     );
   }
-  const geRef = Math.max(1, geUpperBound, getRecipe(targetKey)?.cost || 1);
+  let maxTargetRecipeCost = getRecipe(targetKey)?.cost || 1;
+  for (const itemKey of targetDemandByItem.keys()) {
+    maxTargetRecipeCost = Math.max(maxTargetRecipeCost, getRecipe(itemKey)?.cost || 1);
+  }
+  const geRef = Math.max(1, geUpperBound, maxTargetRecipeCost);
 
-  const targetTimePerUnit = bestTimePerUnit(targetKey, actions);
-  let timeRef = Number.isFinite(targetTimePerUnit) ? targetTimePerUnit * quantityInt : Number.POSITIVE_INFINITY;
+  let timeRef = 0;
+  let hasFiniteTargetTime = false;
+  for (const [itemKey, demandQty] of targetDemandByItem.entries()) {
+    const targetTimePerUnit = bestTimePerUnit(itemKey, actions);
+    if (Number.isFinite(targetTimePerUnit)) {
+      timeRef += targetTimePerUnit * Math.max(1, Math.round(demandQty));
+      hasFiniteTargetTime = true;
+    }
+  }
+  if (!hasFiniteTargetTime) {
+    timeRef = Number.POSITIVE_INFINITY;
+  }
   if (!Number.isFinite(timeRef)) {
     const fastestActionDuration = actions.length > 0 ? Math.min(...actions.map((action) => action.durationSeconds)) : 3600;
     timeRef = fastestActionDuration / 3;
@@ -1006,6 +1044,7 @@ function buildCraftModelSkeleton(options: {
   targetKey: string;
   quantity: number;
   closure: Set<string>;
+  targetDemandByItem?: Map<string, number>;
 }): CraftModelSkeleton {
   const { profile, targetKey, quantity, closure } = options;
   const itemKeys = Array.from(closure).sort();
@@ -1014,7 +1053,10 @@ function buildCraftModelSkeleton(options: {
     unmetVarByItem.set(itemKeys[index], `u_${index}`);
   }
 
-  const craftUpperBounds = estimateCraftUpperBounds(targetKey, quantity);
+  const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
+    ? options.targetDemandByItem
+    : new Map([[targetKey, quantity]]);
+  const craftUpperBounds = estimateCraftUpperBoundsForTargets(targetDemandByItem);
   const craftModels: CraftCostModel[] = [];
   const craftModelByItem = new Map<string, CraftCostModel>();
 
@@ -1076,7 +1118,9 @@ function buildCraftModelSkeleton(options: {
     craftModelByItem.set(itemKey, model);
   }
 
-  const demandByItem = new Map<string, number>(itemKeys.map((itemKey) => [itemKey, itemKey === targetKey ? quantity : 0]));
+  const demandByItem = new Map<string, number>(
+    itemKeys.map((itemKey) => [itemKey, Math.max(0, Math.round(targetDemandByItem.get(itemKey) || 0))])
+  );
 
   return { itemKeys, craftModels, craftModelByItem, unmetVarByItem, demandByItem };
 }
@@ -1100,6 +1144,7 @@ async function solveUnifiedCraftMissionPlan(options: {
   timeLimitSeconds?: number;
   lpRelaxation?: boolean;
   targetCraftedOnly?: boolean;
+  targetCraftedOnlyKeys?: Set<string>;
   craftSkeleton?: CraftModelSkeleton;
   onSolveMetrics?: (metrics: UnifiedSolveMetrics) => void;
   solverFn?: SolverFunction;
@@ -1123,10 +1168,12 @@ async function solveUnifiedCraftMissionPlan(options: {
     timeLimitSeconds,
     lpRelaxation = false,
     targetCraftedOnly = false,
+    targetCraftedOnlyKeys,
     craftSkeleton,
     onSolveMetrics,
     solverFn: solverFnOption,
   } = options;
+  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
   const solve = solverFnOption ?? await getDefaultSolverFn();
   const {
     itemKeys,
@@ -1207,8 +1254,8 @@ async function solveUnifiedCraftMissionPlan(options: {
   for (let itemIndex = 0; itemIndex < itemKeys.length; itemIndex += 1) {
     const itemKey = itemKeys[itemIndex];
     // Target demand is interpreted as additional units beyond current inventory.
-    const inventoryQty = itemKey === targetKey ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const demandQty = demandByItem.get(itemKey) || 0;
+    const inventoryQty = demandQty > 0 ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const terms: Array<{ coefficient: number; variable: string }> = [];
 
     const outputModel = craftModelByItem.get(itemKey);
@@ -1217,7 +1264,7 @@ async function solveUnifiedCraftMissionPlan(options: {
     }
     for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
       const yieldPerMission = actions[actionIndex].yields[itemKey] || 0;
-      if (yieldPerMission > SCORE_EPS && !(targetCraftedOnly && itemKey === targetKey)) {
+      if (yieldPerMission > SCORE_EPS && !effectiveTargetCraftedOnlyKeys.has(itemKey)) {
         terms.push({ coefficient: yieldPerMission, variable: missionVars[actionIndex] });
       }
     }
@@ -1717,10 +1764,18 @@ function craftSkeletonCacheKey(options: {
   quantity: number;
   closure: Set<string>;
   profile: PlayerProfile;
+  targetDemandByItem?: Map<string, number>;
 }): string {
+  const demandKey = options.targetDemandByItem && options.targetDemandByItem.size > 0
+    ? Array.from(options.targetDemandByItem.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([itemKey, qty]) => `${itemKey}:${Math.max(0, Math.round(qty))}`)
+        .join("|")
+    : `${options.targetKey}:${Math.max(1, Math.round(options.quantity))}`;
   return [
     `target:${options.targetKey}`,
     `qty:${Math.max(1, Math.round(options.quantity))}`,
+    `demand:${demandKey}`,
     `counts:${craftCountsFingerprintForClosure(options.profile.craftCounts, options.closure)}`,
   ].join("::");
 }
@@ -1730,6 +1785,7 @@ function getCraftSkeletonCached(options: {
   targetKey: string;
   quantity: number;
   closure: Set<string>;
+  targetDemandByItem?: Map<string, number>;
 }): CraftModelSkeleton {
   const key = craftSkeletonCacheKey(options);
   const cached = craftSkeletonCache.get(key);
@@ -1908,6 +1964,42 @@ function chooseFastQuantityAccelerationBlock(quantity: number): number {
   return Math.max(1, Math.min(FAST_QUANTITY_ACCELERATION_MAX_BLOCK_QUANTITY, Math.ceil(safeQuantity / 25)));
 }
 
+function greatestCommonDivisor(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x;
+}
+
+function targetDemandGcd(targetDemandByItem: Map<string, number>): number {
+  let gcd = 0;
+  for (const quantity of targetDemandByItem.values()) {
+    const safeQuantity = Math.max(0, Math.round(quantity));
+    if (safeQuantity <= 0) {
+      continue;
+    }
+    gcd = gcd === 0 ? safeQuantity : greatestCommonDivisor(gcd, safeQuantity);
+  }
+  return Math.max(1, gcd);
+}
+
+function divideTargetDemand(targetDemandByItem: Map<string, number>, divisor: number): Map<string, number> {
+  const safeDivisor = Math.max(1, Math.round(divisor));
+  if (safeDivisor <= 1) {
+    return new Map(targetDemandByItem);
+  }
+  return new Map(
+    Array.from(targetDemandByItem.entries()).map(([itemKey, quantity]) => [
+      itemKey,
+      Math.max(1, Math.round(quantity / safeDivisor)),
+    ])
+  );
+}
+
 function sumRecordValues(record: Record<string, number>): number {
   return Object.values(record).reduce((sum, value) => sum + Math.max(0, value), 0);
 }
@@ -1950,6 +2042,8 @@ function computeRemainingDemandForPlan(options: {
   actions: MissionAction[];
   missionCounts: Record<string, number>;
   targetCraftedOnly?: boolean;
+  targetDemandByItem?: Map<string, number>;
+  targetCraftedOnlyKeys?: Set<string>;
 }): Record<string, number> {
   const {
     profile,
@@ -1961,15 +2055,19 @@ function computeRemainingDemandForPlan(options: {
     missionCounts,
     targetCraftedOnly = false,
   } = options;
+  const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
+    ? options.targetDemandByItem
+    : new Map([[targetKey, Math.max(0, Math.round(quantity))]]);
+  const targetCraftedOnlyKeys = options.targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
   const actionByKey = new Map(actions.map((action) => [action.key, action]));
   const remaining: Record<string, number> = {};
 
   for (const itemKey of Array.from(closure).sort()) {
-    const demandQty = itemKey === targetKey ? Math.max(0, Math.round(quantity)) : 0;
-    const inventoryQty = itemKey === targetKey ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
+    const demandQty = Math.max(0, Math.round(targetDemandByItem.get(itemKey) || 0));
+    const inventoryQty = demandQty > 0 ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
     let missionOutput = 0;
-    if (!(targetCraftedOnly && itemKey === targetKey)) {
+    if (!targetCraftedOnlyKeys.has(itemKey)) {
       for (const [actionKey, launchesRaw] of Object.entries(missionCounts)) {
         const action = actionByKey.get(actionKey);
         if (!action) {
@@ -2008,12 +2106,16 @@ function computePreMissionDemandForPlan(options: {
   quantity: number;
   closure: Set<string>;
   crafts: Record<string, number>;
+  targetDemandByItem?: Map<string, number>;
 }): Record<string, number> {
   const { profile, targetKey, quantity, closure, crafts } = options;
+  const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
+    ? options.targetDemandByItem
+    : new Map([[targetKey, Math.max(0, Math.round(quantity))]]);
   const remaining: Record<string, number> = {};
   for (const itemKey of Array.from(closure).sort()) {
-    const demandQty = itemKey === targetKey ? Math.max(0, Math.round(quantity)) : 0;
-    const inventoryQty = itemKey === targetKey ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
+    const demandQty = Math.max(0, Math.round(targetDemandByItem.get(itemKey) || 0));
+    const inventoryQty = demandQty > 0 ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
     let ingredientConsumption = 0;
     for (const [craftedItemKey, craftCountRaw] of Object.entries(crafts)) {
@@ -2041,15 +2143,17 @@ function applyMissionYieldToDemand(
   action: MissionAction,
   launchesRaw: number,
   targetKey: string,
-  targetCraftedOnly: boolean
+  targetCraftedOnly: boolean,
+  targetCraftedOnlyKeys?: Set<string>
 ): Record<string, number> {
   const launches = Math.max(0, Math.round(launchesRaw));
   if (launches <= 0) {
     return { ...demand };
   }
   const next: Record<string, number> = { ...demand };
+  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
   for (const [itemKey, yieldPerMission] of Object.entries(action.yields)) {
-    if (targetCraftedOnly && itemKey === targetKey) {
+    if (effectiveTargetCraftedOnlyKeys.has(itemKey)) {
       continue;
     }
     if (yieldPerMission <= 0 || !next[itemKey]) {
@@ -2066,13 +2170,14 @@ function launchesNeededWithinChunk(options: {
   maxLaunches: number;
   targetKey: string;
   targetCraftedOnly: boolean;
+  targetCraftedOnlyKeys?: Set<string>;
 }): number {
-  const { demand, action, maxLaunches, targetKey, targetCraftedOnly } = options;
+  const { demand, action, maxLaunches, targetKey, targetCraftedOnly, targetCraftedOnlyKeys } = options;
   const cap = Math.max(0, Math.round(maxLaunches));
   if (cap <= 0) {
     return 0;
   }
-  if (!demandSatisfied(applyMissionYieldToDemand(demand, action, cap, targetKey, targetCraftedOnly))) {
+  if (!demandSatisfied(applyMissionYieldToDemand(demand, action, cap, targetKey, targetCraftedOnly, targetCraftedOnlyKeys))) {
     return cap;
   }
 
@@ -2080,7 +2185,7 @@ function launchesNeededWithinChunk(options: {
   let high = cap;
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
-    if (demandSatisfied(applyMissionYieldToDemand(demand, action, mid, targetKey, targetCraftedOnly))) {
+    if (demandSatisfied(applyMissionYieldToDemand(demand, action, mid, targetKey, targetCraftedOnly, targetCraftedOnlyKeys))) {
       high = mid;
     } else {
       low = mid + 1;
@@ -2156,6 +2261,8 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
   prepSteps: PrepProgressionStep[];
   prepNoYieldSlotSeconds: number;
   targetCraftedOnly?: boolean;
+  targetDemandByItem?: Map<string, number>;
+  targetCraftedOnlyKeys?: Set<string>;
 }): { unified: UnifiedPlan; totalSlotSeconds: number; repeatFactor: number; unmetTotal: number } {
   const {
     profile,
@@ -2192,6 +2299,8 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
     actions,
     missionCounts,
     targetCraftedOnly,
+    targetDemandByItem: options.targetDemandByItem,
+    targetCraftedOnlyKeys: options.targetCraftedOnlyKeys,
   });
   const geCost = computeGeCostForCrafts(profile, crafts);
   const missionSlotSeconds = actions.reduce((sum, action) => {
@@ -2223,6 +2332,8 @@ async function refineScaledPlanWithProgression(options: {
   unified: UnifiedPlan;
   prepSteps: PrepProgressionStep[];
   targetCraftedOnly?: boolean;
+  targetDemandByItem?: Map<string, number>;
+  targetCraftedOnlyKeys?: Set<string>;
   lootData: LootJson;
   missionDropRarities: ShinyRaritySelection;
 }): Promise<{ actions: MissionAction[]; unified: UnifiedPlan; prunedLaunches: number }> {
@@ -2263,6 +2374,7 @@ async function refineScaledPlanWithProgression(options: {
     quantity: requestedQuantity,
     closure,
     crafts: unified.crafts,
+    targetDemandByItem: options.targetDemandByItem,
   });
   const launchCounts = shipLevelsToLaunchCounts(profile.shipLevels);
   for (const step of prepSteps) {
@@ -2345,10 +2457,11 @@ async function refineScaledPlanWithProgression(options: {
         maxLaunches: chunkLaunches,
         targetKey,
         targetCraftedOnly,
+        targetCraftedOnlyKeys: options.targetCraftedOnlyKeys,
       });
       if (launchesToUse > 0) {
         refinedMissionCounts[currentAction.key] = (refinedMissionCounts[currentAction.key] || 0) + launchesToUse;
-        demand = applyMissionYieldToDemand(demand, currentAction, launchesToUse, targetKey, targetCraftedOnly);
+        demand = applyMissionYieldToDemand(demand, currentAction, launchesToUse, targetKey, targetCraftedOnly, options.targetCraftedOnlyKeys);
         incrementLaunchCounts(launchCounts, entry.action.ship, entry.action.durationType, launchesToUse);
       }
       prunedLaunches += Math.max(0, chunkLaunches - launchesToUse);
@@ -2369,6 +2482,8 @@ async function refineScaledPlanWithProgression(options: {
     actions: Array.from(refinedActionByKey.values()),
     missionCounts: refinedMissionCounts,
     targetCraftedOnly,
+    targetDemandByItem: options.targetDemandByItem,
+    targetCraftedOnlyKeys: options.targetCraftedOnlyKeys,
   });
   const totalSlotSeconds = Array.from(refinedActionByKey.values()).reduce((sum, action) => {
     const launches = Math.max(0, Math.round(refinedMissionCounts[action.key] || 0));
@@ -2396,6 +2511,8 @@ async function repairScaledPlanRemainingDemand(options: {
   unified: UnifiedPlan;
   prepSteps: PrepProgressionStep[];
   targetCraftedOnly?: boolean;
+  targetDemandByItem?: Map<string, number>;
+  targetCraftedOnlyKeys?: Set<string>;
   solverFn?: SolverFunction;
 }): Promise<{ unified: UnifiedPlan; repairedLaunches: number; notes: string[] }> {
   const {
@@ -2463,10 +2580,12 @@ async function repairScaledPlanRemainingDemand(options: {
     targetKey,
     quantity: requestedQuantity,
     closure,
-      crafts: unified.crafts,
-      actions,
-      missionCounts: repairedMissionCounts,
+    crafts: unified.crafts,
+    actions,
+    missionCounts: repairedMissionCounts,
     targetCraftedOnly,
+    targetDemandByItem: options.targetDemandByItem,
+    targetCraftedOnlyKeys: options.targetCraftedOnlyKeys,
   });
   const totalSlotSeconds = actions.reduce((sum, action) => {
     const launches = Math.max(0, Math.round(repairedMissionCounts[action.key] || 0));
@@ -2516,6 +2635,28 @@ function buildTargetBreakdown(options: {
     fromMissionsExpected,
     shortfall,
   };
+}
+
+function buildTargetBreakdowns(options: {
+  targetDemandByItem: Map<string, number>;
+  crafts: Record<string, number>;
+  actions: MissionAction[];
+  missionCounts: Record<string, number>;
+  remainingDemand: Record<string, number>;
+  targetCraftedOnlyKeys: Set<string>;
+}): TargetBreakdownRow[] {
+  return Array.from(options.targetDemandByItem.entries()).map(([targetKey, quantity]) => ({
+    itemId: itemKeyToId(targetKey),
+    ...buildTargetBreakdown({
+      quantity,
+      targetKey,
+      crafts: options.crafts,
+      actions: options.actions,
+      missionCounts: options.missionCounts,
+      remainingDemand: options.remainingDemand,
+      targetCraftedOnly: options.targetCraftedOnlyKeys.has(targetKey),
+    }),
+  }));
 }
 
 type PrepOptionRequirement = {
@@ -3364,6 +3505,36 @@ function dedupeProgressionCandidatesByMissionOptions(candidates: ProgressionCand
   };
 }
 
+function normalizePlannerTargets(targetItemId: string, quantity: number, targets?: PlannerTarget[]): {
+  primaryTargetKey: string;
+  primaryQuantity: number;
+  targets: PlannerTarget[];
+  targetDemandByItem: Map<string, number>;
+  targetCraftedOnlyKeys: Set<string>;
+} {
+  const rawTargets = targets && targets.length > 0 ? targets : [{ targetItemId, quantity }];
+  const targetDemandByItem = new Map<string, number>();
+  for (const target of rawTargets) {
+    const itemKey = itemIdToCanonicalKey(target.targetItemId);
+    const safeQuantity = Math.max(1, Math.round(target.quantity));
+    targetDemandByItem.set(itemKey, (targetDemandByItem.get(itemKey) || 0) + safeQuantity);
+  }
+  const normalizedTargets = Array.from(targetDemandByItem.entries()).map(([itemKey, qty]) => ({
+    targetItemId: itemKeyToId(itemKey),
+    quantity: Math.max(1, Math.round(qty)),
+  }));
+  const primary = normalizedTargets[0] || { targetItemId, quantity };
+  const primaryTargetKey = itemIdToCanonicalKey(primary.targetItemId);
+  const primaryQuantity = Math.max(1, Math.round(primary.quantity));
+  return {
+    primaryTargetKey,
+    primaryQuantity,
+    targets: normalizedTargets,
+    targetDemandByItem,
+    targetCraftedOnlyKeys: new Set(targetDemandByItem.keys()),
+  };
+}
+
 async function planForTargetHeuristic(
   profile: PlayerProfile,
   targetItemId: string,
@@ -3551,6 +3722,7 @@ async function planForTargetHeuristic(
   return {
     targetItemId: itemKeyToId(targetKey),
     quantity: quantityInt,
+    targets: [{ targetItemId: itemKeyToId(targetKey), quantity: quantityInt }],
     priorityTime,
     geCost,
     totalSlotSeconds,
@@ -3560,6 +3732,7 @@ async function planForTargetHeuristic(
     missions: missionRows,
     unmetItems,
     targetBreakdown,
+    targetBreakdowns: [{ itemId: itemKeyToId(targetKey), ...targetBreakdown }],
     progression: {
       prepHours: 0,
       prepLaunches: [],
@@ -3577,19 +3750,36 @@ export async function planForTarget(
   priorityTimeRaw: number,
   plannerOptions: PlannerOptions = {}
 ): Promise<PlannerResult> {
-  const targetKey = itemIdToCanonicalKey(targetItemId);
+  const normalizedTargets = normalizePlannerTargets(targetItemId, quantity, plannerOptions.targets);
+  const targetKey = normalizedTargets.primaryTargetKey;
   const priorityTime = Math.max(0, Math.min(1, priorityTimeRaw));
-  const quantityInt = Math.max(1, Math.round(quantity));
+  const quantityInt = normalizedTargets.primaryQuantity;
+  const multiTarget = normalizedTargets.targets.length > 1;
   const fastMode = Boolean(plannerOptions.fastMode);
   const missionDropRarities = normalizeShinyRaritySelection(plannerOptions.missionDropRarities);
   const targetCraftedOnly = Boolean(plannerOptions.targetCraftedOnly);
-  const fastQuantityAcceleration =
+  const multiTargetScaleFactor = multiTarget ? targetDemandGcd(normalizedTargets.targetDemandByItem) : 1;
+  const singleTargetFastQuantityAcceleration =
     fastMode &&
+    !multiTarget &&
     !plannerOptions.disableFastQuantityAcceleration &&
     quantityInt >= FAST_QUANTITY_ACCELERATION_MIN_QUANTITY;
-  const solveQuantity = fastQuantityAcceleration
+  const multiTargetFastQuantityAcceleration =
+    fastMode &&
+    multiTarget &&
+    !plannerOptions.disableFastQuantityAcceleration &&
+    multiTargetScaleFactor > 1;
+  const fastQuantityAcceleration = singleTargetFastQuantityAcceleration || multiTargetFastQuantityAcceleration;
+  const solveQuantity = singleTargetFastQuantityAcceleration
     ? chooseFastQuantityAccelerationBlock(quantityInt)
+    : multiTargetFastQuantityAcceleration
+      ? Math.max(1, Math.round(quantityInt / multiTargetScaleFactor))
     : quantityInt;
+  const solveTargetDemandByItem = multiTargetFastQuantityAcceleration
+    ? divideTargetDemand(normalizedTargets.targetDemandByItem, multiTargetScaleFactor)
+    : multiTarget
+      ? normalizedTargets.targetDemandByItem
+    : new Map([[targetKey, solveQuantity]]);
   const missionDropRarityKey = missionDropRarityCacheKey(missionDropRarities);
   const solverFn = plannerOptions.solverFn;
   const injectedLootData = plannerOptions.lootData;
@@ -3726,6 +3916,11 @@ export async function planForTarget(
   await yieldForProgressFlush();
 
   const closure = getTargetClosureCached(targetKey);
+  for (const target of normalizedTargets.targets) {
+    for (const itemKey of getTargetClosureCached(itemIdToCanonicalKey(target.targetItemId))) {
+      closure.add(itemKey);
+    }
+  }
   const closureKey = closureFingerprint(closure);
   const representativeBlockProfile = profile;
 
@@ -3746,6 +3941,7 @@ export async function planForTarget(
   const candidateReuseKey = [
     progressionKey,
     `target:${targetKey}`,
+    `targets:${normalizedTargets.targets.map((target) => `${target.targetItemId}:${target.quantity}`).join(",")}`,
     `qty:${solveQuantity}`,
     `rar:${missionDropRarityKey}`,
     `craftedOnly:${targetCraftedOnly ? 1 : 0}`,
@@ -3800,6 +3996,7 @@ export async function planForTarget(
     targetKey,
     quantity: solveQuantity,
     closure,
+    targetDemandByItem: solveTargetDemandByItem,
   });
 
   const { geRef, timeRef } = computeObjectiveReferences({
@@ -3807,6 +4004,7 @@ export async function planForTarget(
     targetKey,
     quantity: solveQuantity,
     actions: baseActions,
+    targetDemandByItem: solveTargetDemandByItem,
   });
 
   try {
@@ -4013,6 +4211,7 @@ export async function planForTarget(
         lpRelaxation,
         strictGeObjective: geOnlyCandidateMilp,
         targetCraftedOnly,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
         craftSkeleton,
         solverFn,
         onSolveMetrics: (metrics) => {
@@ -4045,6 +4244,7 @@ export async function planForTarget(
             geCostUpperBound: baselineUnified.geCost,
             lpRelaxation: false,
             targetCraftedOnly,
+            targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
             craftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4324,6 +4524,7 @@ export async function planForTarget(
         targetKey,
         quantity: quantityInt,
         actions: comboActions,
+        targetDemandByItem: normalizedTargets.targetDemandByItem,
       });
       const unified = await solveUnifiedCraftMissionPlan({
         profile,
@@ -4337,6 +4538,7 @@ export async function planForTarget(
         maxMissionLaunchesByOption,
         phasedChainConstraints,
         targetCraftedOnly,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
         craftSkeleton: fullQuantityCraftSkeleton,
         solverFn,
         onSolveMetrics: (metrics) => {
@@ -4352,6 +4554,8 @@ export async function planForTarget(
         actions: comboActions,
         missionCounts: unified.missionCounts,
         targetCraftedOnly,
+        targetDemandByItem: normalizedTargets.targetDemandByItem,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
       });
       const checkedUnified: UnifiedPlan = {
         ...unified,
@@ -4385,6 +4589,9 @@ export async function planForTarget(
       if (fastMode || geOnlyMode || quantityInt < FAST_QUANTITY_ACCELERATION_MIN_QUANTITY) {
         return;
       }
+      if (multiTarget) {
+        return;
+      }
       const blockQuantity = chooseFastQuantityAccelerationBlock(quantityInt);
       if (blockQuantity >= quantityInt) {
         return;
@@ -4396,12 +4603,14 @@ export async function planForTarget(
         targetKey,
         quantity: blockQuantity,
         closure,
+        targetDemandByItem: new Map([[targetKey, blockQuantity]]),
       });
       const blockRefs = computeObjectiveReferences({
         profile: blockProfile,
         targetKey,
         quantity: blockQuantity,
         actions: baseActions,
+        targetDemandByItem: new Map([[targetKey, blockQuantity]]),
       });
       type BlockScreenResult = {
         input: CandidateEvalInput;
@@ -4445,6 +4654,7 @@ export async function planForTarget(
             phasedChainConstraints: input.phasedChainConstraints,
             lpRelaxation: true,
             targetCraftedOnly,
+            targetCraftedOnlyKeys: targetCraftedOnly ? new Set([targetKey]) : undefined,
             craftSkeleton: blockCraftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4499,6 +4709,7 @@ export async function planForTarget(
             phasedChainConstraints: screened.input.phasedChainConstraints,
             lpRelaxation: false,
             targetCraftedOnly,
+            targetCraftedOnlyKeys: targetCraftedOnly ? new Set([targetKey]) : undefined,
             craftSkeleton: blockCraftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4895,6 +5106,7 @@ export async function planForTarget(
               timeLimitSeconds: NORMAL_GE_POLISH_TIME_LIMIT_SECONDS,
               lpRelaxation: false,
               targetCraftedOnly,
+              targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
               craftSkeleton,
               solverFn,
               onSolveMetrics: (metrics) => {
@@ -5003,6 +5215,8 @@ export async function planForTarget(
         prepSteps: best.candidate.prepSteps,
         prepNoYieldSlotSeconds: best.prepNoYieldSlotSeconds,
         targetCraftedOnly,
+        targetDemandByItem: normalizedTargets.targetDemandByItem,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
       });
       const refined = await refineScaledPlanWithProgression({
         profile,
@@ -5013,6 +5227,8 @@ export async function planForTarget(
         unified: scaled.unified,
         prepSteps: best.candidate.prepSteps,
         targetCraftedOnly,
+        targetDemandByItem: normalizedTargets.targetDemandByItem,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
         lootData,
         missionDropRarities,
       });
@@ -5030,6 +5246,8 @@ export async function planForTarget(
           unified: refined.unified,
           prepSteps: best.candidate.prepSteps,
           targetCraftedOnly,
+          targetDemandByItem: normalizedTargets.targetDemandByItem,
+          targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
           solverFn,
         });
         outputUnified = repaired.unified;
@@ -5049,9 +5267,15 @@ export async function planForTarget(
         Math.max(1, computeGeCostForCrafts(profile, outputUnified.crafts), geRef),
         Math.max(1, timeRef * scaled.repeatFactor)
       );
-      refinementNotes.push(
-        `Fast mode large-quantity acceleration solved a representative block of ${solveQuantity.toLocaleString()} and scaled its mission/craft pattern ${scaled.repeatFactor.toLocaleString()}x for the requested ${quantityInt.toLocaleString()}.`
-      );
+      if (multiTargetFastQuantityAcceleration) {
+        refinementNotes.push(
+          `Fast mode multi-target acceleration divided requested target quantities by their GCD (${multiTargetScaleFactor.toLocaleString()}), solved the representative bundle, and scaled its mission/craft pattern ${scaled.repeatFactor.toLocaleString()}x.`
+        );
+      } else {
+        refinementNotes.push(
+          `Fast mode large-quantity acceleration solved a representative block of ${solveQuantity.toLocaleString()} and scaled its mission/craft pattern ${scaled.repeatFactor.toLocaleString()}x for the requested ${quantityInt.toLocaleString()}.`
+        );
+      }
       refinementNotes.push(
         "Fast mode validates scaled shortcuts with exact one-time inventory accounting; when the representative block uses current inventory, residual ingredient demand is repaired with additional launches."
       );
@@ -5077,6 +5301,7 @@ export async function planForTarget(
           targetKey,
           quantity: quantityInt,
           closure,
+          targetDemandByItem: normalizedTargets.targetDemandByItem,
         });
         let testedMonolithicCount = 0;
         let adoptedMonolithicCombo: AvailableCombo | null = null;
@@ -5145,6 +5370,14 @@ export async function planForTarget(
       missionCounts: outputUnified.missionCounts,
       remainingDemand: outputUnified.remainingDemand,
       targetCraftedOnly,
+    });
+    const targetBreakdowns = buildTargetBreakdowns({
+      targetDemandByItem: normalizedTargets.targetDemandByItem,
+      crafts: outputUnified.crafts,
+      actions: outputActions,
+      missionCounts: outputUnified.missionCounts,
+      remainingDemand: outputUnified.remainingDemand,
+      targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : new Set<string>(),
     });
     const unmetItems = Object.entries(outputUnified.remainingDemand)
       .filter(([, qty]) => qty > 1e-6)
@@ -5308,6 +5541,7 @@ export async function planForTarget(
     const result: PlannerResult = {
       targetItemId: itemKeyToId(targetKey),
       quantity: quantityInt,
+      targets: normalizedTargets.targets,
       priorityTime,
       geCost: outputUnified.geCost,
       totalSlotSeconds: outputTotalSlotSeconds,
@@ -5317,6 +5551,7 @@ export async function planForTarget(
       missions: missionRows,
       unmetItems,
       targetBreakdown,
+      targetBreakdowns,
       progression: {
         prepHours,
         prepLaunches: compactedPrepLaunches,

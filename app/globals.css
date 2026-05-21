@@ -164,9 +164,9 @@ a {
 }
 
 .page {
-  width: min(1100px, 100%);
+  width: min(1240px, 100%);
   margin: 0 auto;
-  padding: 24px;
+  padding: 16px;
 }
 
 .panel {

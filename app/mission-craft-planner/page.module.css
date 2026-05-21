@@ -6,14 +6,423 @@
   background: color-mix(in oklab, var(--card), transparent 20%);
 }
 
+.plannerForm {
+  --planner-control-font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin-top: 0;
+}
+
+.plannerControlGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.controlColumn {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.profileRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(132px, 0.72fr);
+  gap: 14px;
+}
+
+.profileCard {
+  padding: 14px 16px;
+}
+
+.fieldBlock {
+  min-width: 0;
+}
+
+.fieldLabel {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.textInput,
+.selectInput {
+  width: 100%;
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 8%);
+  background: color-mix(in oklab, var(--field), transparent 12%);
+  color: var(--field-ink);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.textInput {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+  letter-spacing: 0.02em;
+}
+
+.textInput:focus,
+.selectInput:focus,
+.targetPickerInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 70%);
+  background: color-mix(in oklab, var(--field), var(--panel) 22%);
+}
+
+.selectWrap {
+  position: relative;
+}
+
+.selectInput {
+  appearance: none;
+  padding-right: 30px;
+  cursor: pointer;
+}
+
+.selectWrap::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  pointer-events: none;
+  transform: translateY(-75%) rotate(45deg);
+}
+
+.controlCard {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 12%);
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--card), var(--panel) 22%),
+    color-mix(in oklab, var(--panel), black 8%)
+  );
+}
+
+.tightControlCard {
+  padding: 14px 16px;
+}
+
+.controlCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.controlCardTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cardSub,
+.helpText {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.helpText {
+  margin-top: -4px;
+}
+
+.titleDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent), transparent 45%);
+}
+
+.customCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  user-select: none;
+  cursor: pointer;
+}
+
+.customCheck input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.customCheck input + span {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid color-mix(in oklab, var(--stroke), var(--ink) 15%);
+  background: color-mix(in oklab, var(--field), transparent 18%);
+}
+
+.customCheck input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.customCheck input:checked + span::after {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 5px;
+  margin: 3px 0 0 3px;
+  border-left: 2px solid var(--button-ink);
+  border-bottom: 2px solid var(--button-ink);
+  transform: rotate(-45deg);
+}
+
+.targetRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.targetRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 110px 28px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px 8px 8px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 12%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel), var(--accent) 3%);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.targetRow:hover {
+  border-color: color-mix(in oklab, var(--stroke), var(--ink) 20%);
+}
+
+.targetIcon {
+  display: flex;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 12%);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 35% 28%, color-mix(in oklab, #fff, transparent 88%), transparent 60%),
+    color-mix(in oklab, var(--field), var(--panel) 28%);
+}
+
+.targetIcon img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+
+.targetRowSelect {
+  display: flex;
+  min-width: 0;
+  height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.targetRowSelect:hover {
+  background: transparent !important;
+}
+
+.targetRowSelect:focus,
+.targetRowSelect:focus-visible,
+.targetStepper button:focus,
+.targetStepper button:focus-visible,
+.targetRemove:focus,
+.targetRemove:focus-visible,
+.addTargetButton:focus,
+.addTargetButton:focus-visible {
+  outline: none;
+  box-shadow: none !important;
+}
+
+.targetRowSelect span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--planner-control-font);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.targetStepper {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  height: 30px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 12%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--field), transparent 12%);
+}
+
+.targetStepper button,
+.targetRemove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--muted);
+  cursor: pointer;
+  outline: none;
+}
+
+.targetStepper button {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.targetStepper button:hover,
+.targetRemove:hover {
+  background: color-mix(in oklab, var(--accent), transparent 86%) !important;
+  color: var(--ink);
+}
+
+.targetStepper input {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: center;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+  font-size: 13px;
+  font-weight: 800;
+  outline: none;
+}
+
+.targetStepper:focus-within {
+  border-color: color-mix(in oklab, var(--stroke), transparent 12%);
+  box-shadow: none;
+}
+
+.targetStepper input::-webkit-outer-spin-button,
+.targetStepper input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.targetRemove {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+.targetRemove svg {
+  width: 14px;
+  height: 14px;
+}
+
+.targetRemove path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.targetRemove:hover {
+  background: color-mix(in oklab, var(--accent-2), transparent 85%) !important;
+  color: color-mix(in oklab, var(--accent-2), #fff 20%);
+}
+
+.targetRemove:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.targetRowDropdown {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: calc(100% + 6px);
+  z-index: 35;
+}
+
 .targetPicker {
   position: relative;
 }
 
+.targetRowDropdown .targetPickerDropdown {
+  position: relative;
+  top: auto;
+  margin-top: 4px;
+}
+
+.addTargetButton {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px dashed color-mix(in oklab, var(--stroke), var(--ink) 18%);
+  border-radius: 10px;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.addTargetButton:hover {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent), transparent 90%) !important;
+}
+
 .targetPickerInput {
   width: 100%;
-  padding-left: 40px;
-  padding-right: 34px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 10%);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--field), var(--panel) 18%);
+  color: var(--field-ink);
+  font-size: 13px;
+  font-weight: 650;
+  outline: none;
 }
 
 .targetPickerIconWrap {
@@ -50,13 +459,17 @@
 }
 
 .targetPickerChevron {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
   color: var(--muted);
-  font-size: 12px;
   pointer-events: none;
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.targetRowSelect .targetPickerChevron {
+  flex: 0 0 auto;
 }
 
 .targetPickerDropdown {
@@ -83,6 +496,9 @@
   padding: 4px 10px;
   cursor: default;
   color: var(--ink);
+  font-family: var(--planner-control-font);
+  font-size: 12.5px;
+  font-weight: 500;
   user-select: none;
 }
 
@@ -103,6 +519,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--planner-control-font);
 }
 
 .targetPickerCheck {
@@ -116,7 +533,7 @@
 }
 
 .targetPickerOption[data-selected="1"]:not([data-active="1"]) .targetPickerOptionLabel {
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .targetPickerEmpty {
@@ -125,19 +542,25 @@
   font-size: 13px;
 }
 
-.sourceMatrixField {
-  gap: 6px;
+@media (max-width: 900px) {
+  .plannerControlGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .profileRow {
+    grid-template-columns: 1fr;
+  }
+
+  .targetRow {
+    grid-template-columns: 36px minmax(0, 1fr) 96px 28px;
+  }
 }
 
 .sourceMatrix {
   display: grid;
-  grid-template-columns: minmax(82px, auto) repeat(5, minmax(40px, auto));
-  gap: 6px 8px;
+  grid-template-columns: 64px repeat(5, minmax(0, 1fr));
+  gap: 6px 5px;
   align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--stroke);
-  border-radius: 10px;
-  background: color-mix(in oklab, var(--card), transparent 8%);
 }
 
 .matrixSpacer {
@@ -145,6 +568,7 @@
 }
 
 .matrixHeader {
+  padding-bottom: 2px;
   font-size: 11px;
   color: var(--muted);
   text-transform: uppercase;
@@ -162,13 +586,14 @@
 }
 
 .matrixHeaderLegendary {
-  color: #f7c548;
+  color: #ffa860;
 }
 
 .matrixRowLabel {
-  font-size: 12px;
-  color: var(--ink);
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
 .matrixCell {
@@ -179,27 +604,35 @@
 }
 
 .matrixToggle {
-  min-width: 46px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--stroke);
-  font-size: 11px;
-  line-height: 1.2;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid;
+  font-size: 10.5px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  box-shadow: none !important;
 }
 
 .matrixToggle[data-state="use"] {
-  border-color: color-mix(in oklab, var(--accent), var(--stroke) 20%);
-  background: color-mix(in oklab, var(--accent), transparent 70%);
-  color: color-mix(in oklab, var(--button-ink), var(--ink) 35%);
+  border-color: color-mix(in oklab, var(--accent), transparent 38%);
+  background: color-mix(in oklab, var(--accent), transparent 84%) !important;
+  color: color-mix(in oklab, var(--accent), #fff 15%);
 }
 
 .matrixToggle[data-state="skip"] {
-  border-color: color-mix(in oklab, var(--stroke), transparent 15%);
-  background: color-mix(in oklab, var(--field), var(--panel) 30%);
+  border-color: color-mix(in oklab, var(--stroke), transparent 24%);
+  background: transparent !important;
   color: var(--muted);
+}
+
+.matrixToggle:hover {
+  border-color: color-mix(in oklab, var(--stroke), var(--ink) 18%);
+  background: color-mix(in oklab, var(--accent), transparent 90%) !important;
 }
 
 .matrixCellMuted {
@@ -208,47 +641,165 @@
   letter-spacing: 0.02em;
 }
 
-.quantityOption {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.quantityOption input {
-  width: 15px;
-  height: 15px;
-  margin: 0;
-}
-
-.actionColumn {
-  min-width: 220px;
+.buildCard {
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
-  gap: 10px;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid color-mix(in oklab, var(--stroke), var(--accent) 26%);
+  border-radius: 14px;
+  background:
+    radial-gradient(420px 200px at 80% -20%, color-mix(in oklab, var(--accent), transparent 82%), transparent 60%),
+    linear-gradient(180deg, color-mix(in oklab, var(--button-bg), var(--panel) 56%), color-mix(in oklab, var(--panel), black 12%));
 }
 
-.buildActionStack {
+.buildButton {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.fastModeToggle {
-  display: inline-flex;
+  width: 100%;
+  height: 48px;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  border: 0;
+  border-radius: 11px;
+  background: linear-gradient(
+    180deg,
+    #4ea4ec 0%,
+    #2d7fc9 100%
+  ) !important;
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.18) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.25) inset,
+    0 6px 18px color-mix(in oklab, var(--accent), transparent 70%);
+}
+
+.buildButton:hover:not(:disabled) {
+  background: linear-gradient(
+    180deg,
+    #5aa9ef 0%,
+    #3488d1 100%
+  ) !important;
+}
+
+.buildButton svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.sliderBlock {
+  min-width: 0;
+}
+
+.sliderHeads {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.sliderActive {
+  color: var(--ink);
+}
+
+.sliderWrap {
+  position: relative;
+  padding: 6px 0;
+}
+
+.sliderWrap input[type="range"] {
+  width: 100%;
+  height: 6px;
+  padding: 0;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--accent) 0% var(--pct, 100%),
+    color-mix(in oklab, var(--accent), transparent 82%) var(--pct, 100%) 100%
+  );
+  outline: none;
+}
+
+.sliderWrap input[type="range"]::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  appearance: none;
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent), transparent 76%), 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+.sliderWrap input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent), transparent 76%), 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+.sliderLabels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sliderLabels b {
+  color: color-mix(in oklab, var(--ink), var(--muted) 30%);
+}
+
+.secondaryButton {
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in oklab, var(--stroke), var(--accent) 20%);
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent), transparent 90%) !important;
+}
+
+.demoNotice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel), var(--accent) 8%);
+  color: var(--muted);
   font-size: 13px;
 }
 
-.fastModeToggle input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
+.demoNotice button {
+  white-space: nowrap;
 }
 
 .resultsDivider {
@@ -410,11 +961,7 @@
 
 @media (max-width: 900px) {
   .sourceMatrix {
-    grid-template-columns: minmax(72px, auto) repeat(5, minmax(36px, auto));
-  }
-
-  .actionColumn {
-    min-width: 100%;
+    grid-template-columns: 64px repeat(5, minmax(0, 1fr));
   }
 
   .timelineLaneRow {
@@ -548,58 +1095,165 @@
 }
 
 .shipSelectorWrap {
-  margin-top: 6px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 12%);
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--card), var(--panel) 22%),
+    color-mix(in oklab, var(--panel), black 8%)
+  );
+  container-type: inline-size;
 }
 
 .shipSelectorToggle {
-  all: unset;
+  width: 100%;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--ink);
   cursor: pointer;
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
-  font-size: 13px;
-  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--planner-control-font);
+  font-weight: 600;
   user-select: none;
+  outline: none;
 }
 
 .shipSelectorToggle:hover {
-  color: var(--ink);
+  background: transparent !important;
+}
+
+.shipSelectorToggle:focus,
+.shipSelectorToggle:focus-visible {
+  outline: none;
+  box-shadow: none !important;
+}
+
+.shipSelectorToggleLeft {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .shipSelectorChevron {
   display: inline-block;
-  font-size: 10px;
+  width: 9px;
+  height: 9px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
   transition: transform 0.15s ease;
 }
 
 .shipSelectorChevron[data-open="1"] {
-  transform: rotate(90deg);
+  transform: rotate(-135deg) translate(2px, 2px);
+}
+
+.shipSelectorCount {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shipSelectorCount em {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 650;
+}
+
+.shipChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.shipChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 9px;
+  border: 1px solid color-mix(in oklab, var(--stroke), transparent 10%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent), transparent 92%);
+  color: var(--ink);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.shipChipDurations {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.shipChipDurations span {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 700;
+}
+
+.shipChipSHORT {
+  background: #5db8ff;
+  color: #08111d;
+}
+
+.shipChipLONG {
+  background: #b78bff;
+  color: #0c0717;
+}
+
+.shipChipEPIC {
+  background: #ffa860;
+  color: #1a0e02;
 }
 
 .shipSelectorPanel {
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--stroke);
-  border-radius: 10px;
-  background: color-mix(in oklab, var(--card), transparent 8%);
+  margin-top: 12px;
+  padding-right: 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   max-height: 340px;
   overflow: auto;
 }
 
 .shipSelectorActions {
   display: flex;
-  gap: 10px;
+  gap: 14px;
   margin-bottom: 8px;
-  font-size: 12px;
   justify-content: flex-end;
 }
 
 .shipSelectorActions button {
-  all: unset;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
   cursor: pointer;
-  color: var(--muted);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--muted), transparent 50%);
+  color: var(--accent);
+  font-family: var(--planner-control-font);
+  font-size: 11.5px;
+  font-weight: 750;
+  text-decoration: none;
 }
 
 .shipSelectorActions button:hover {
@@ -607,30 +1261,42 @@
 }
 
 .shipSelectorList {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 14px;
 }
 
 .shipSelectorRow {
   display: grid;
-  grid-template-columns: 28px 1fr auto;
-  gap: 8px;
-  align-items: center;
-  min-height: 30px;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-height: 42px;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+
+@container (max-width: 440px) {
+  .shipSelectorList {
+    grid-template-columns: 1fr;
+  }
+}
+
+.shipSelectorRow:hover {
+  background: color-mix(in oklab, var(--accent), transparent 94%);
 }
 
 .shipSelectorImage {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   object-fit: contain;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .shipSelectorImageFallback {
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
   border: 1px solid color-mix(in oklab, var(--stroke), transparent 24%);
   color: var(--muted);
   display: inline-flex;
@@ -642,10 +1308,12 @@
 
 .shipSelectorNameBlock {
   min-width: 0;
+  line-height: 1.15;
 }
 
 .shipSelectorName {
-  font-size: 13px;
+  font-family: var(--planner-control-font);
+  font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -653,44 +1321,107 @@
 }
 
 .shipSelectorStars {
-  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+  font-size: 10.5px;
   color: var(--muted);
 }
 
 .shipSelectorDurations {
   display: flex;
-  gap: 10px;
+  gap: 4px;
+  padding-top: 1px;
 }
 
 .shipSelectorDurLabel {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  border: 1px solid;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none !important;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  opacity: 0.55;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.shipSelectorDurLabel:hover {
+  opacity: 0.85;
 }
 
 .shipSelectorDurShort {
   color: #4aa3ff;
+  border-color: color-mix(in oklab, #4aa3ff, transparent 68%);
 }
 
 .shipSelectorDurStandard {
   color: #b78cff;
+  border-color: color-mix(in oklab, #b78cff, transparent 68%);
 }
 
 .shipSelectorDurExtended {
-  color: #f7c548;
+  color: #ffa860;
+  border-color: color-mix(in oklab, #ffa860, transparent 68%);
+}
+
+.shipSelectorDurLabel:has(input:checked) {
+  opacity: 1;
+}
+
+.shipSelectorDurShort:has(input:checked) {
+  border-color: #4aa3ff;
+  background: #4aa3ff !important;
+  color: #08111d;
+}
+
+.shipSelectorDurStandard:has(input:checked) {
+  border-color: #b78cff;
+  background: #b78cff !important;
+  color: #0c0717;
+}
+
+.shipSelectorDurExtended:has(input:checked) {
+  border-color: #ffa860;
+  background: #ffa860 !important;
+  color: #1a0e02;
 }
 
 .shipSelectorDurLabel input {
-  width: 14px;
-  height: 14px;
-  margin: 0;
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 @media (max-width: 600px) {
+  .targetRow {
+    grid-template-columns: 36px minmax(0, 1fr) 94px 28px;
+    gap: 8px;
+  }
+
+  .targetRowSelect span:first-child {
+    font-size: 12.5px;
+  }
+
+  .sourceMatrix {
+    grid-template-columns: 58px repeat(5, minmax(0, 1fr));
+  }
+
+  .matrixToggle {
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
+  }
+
+  .shipSelectorList {
+    grid-template-columns: 1fr;
+  }
+
   .shipSelectorRow {
     grid-template-columns: 28px 1fr;
   }

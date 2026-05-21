@@ -27,11 +27,11 @@ crafts instead of hiding them as if they would auto-craft under a parent.
   - This fixes cases like already-owned T3 deflectors causing the displayed manual plan to under-deliver
 XP.
 
-- Added **Max manual** craft limits to Max-XP plans.
+- Added **Max crafts** limits to Max-XP plans.
   - Available in Tree and Flat views.
   - Blank means unlimited.
-  - `0` excludes manual crafting for that artifact, while still allowing it to be auto-crafted if a
-parent craft requires it.
+  - `0` prevents that artifact from being crafted at all, including as an auto-crafted ingredient for
+parent crafts.
 
 - Added better ingredient visibility.
   - Hover craft/count values to see starting inventory, inventory consumed, used-by, and consumes details.

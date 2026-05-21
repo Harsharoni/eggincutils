@@ -1082,7 +1082,7 @@ export default function XpGeCraftPage(): JSX.Element {
     if (savedStandaloneOpen != null) {
       setStandaloneOpen(savedStandaloneOpen);
     }
-    const savedCraftLimits = parseStoredCraftLimits(readFirstStoredString([LOCAL_PREF_KEYS.craftManualLimits]));
+    const savedCraftLimits = parseStoredCraftLimits(readFirstStoredString([LOCAL_PREF_KEYS.craftAllLimits]));
     setAppliedCraftLimits(savedCraftLimits);
     setDraftCraftLimitInputs(craftLimitsToInputs(savedCraftLimits));
     setPrefsLoaded(true);
@@ -1145,7 +1145,7 @@ export default function XpGeCraftPage(): JSX.Element {
     if (!prefsLoaded) {
       return;
     }
-    writeStoredString([LOCAL_PREF_KEYS.craftManualLimits], JSON.stringify(appliedCraftLimits));
+    writeStoredString([LOCAL_PREF_KEYS.craftAllLimits], JSON.stringify(appliedCraftLimits));
   }, [appliedCraftLimits, prefsLoaded]);
 
   useEffect(() => {
@@ -1234,7 +1234,7 @@ export default function XpGeCraftPage(): JSX.Element {
     });
   }
 
-  function renderMaxManualInput(artifact: string): JSX.Element {
+  function renderMaxCraftInput(artifact: string): JSX.Element {
     const draftValue = draftCraftLimitInputs[artifact] || "";
     const appliedValue = appliedCraftLimits[artifact];
     const isPending = (draftValue === "" ? null : Number(draftValue)) !== (appliedValue ?? null);
@@ -1245,8 +1245,8 @@ export default function XpGeCraftPage(): JSX.Element {
         inputMode="numeric"
         value={draftValue}
         placeholder="∞"
-        aria-label={`Max manual crafts for ${getArtifactDisplayLabel(artifact)}`}
-        title="Blank means unlimited. 0 excludes manual crafts but still allows auto-crafts needed by parent rows."
+        aria-label={`Max crafts for ${getArtifactDisplayLabel(artifact)}`}
+        title="Blank means unlimited. 0 prevents this artifact from being crafted manually or as an auto-crafted ingredient."
         onChange={(event) => setDraftCraftLimit(artifact, event.target.value)}
       />
     );
@@ -1693,7 +1693,7 @@ export default function XpGeCraftPage(): JSX.Element {
                         <tr>
                           <th>Craft</th>
                           <th className={styles.num}>Count</th>
-                          <th className={styles.num}>{renderStackedHeader("Max", "manual")}</th>
+                          <th className={styles.num}>{renderStackedHeader("Max", "crafts")}</th>
                           <th className={styles.num}>XP</th>
                           <th className={styles.num} title="Direct craft spend for the rows shown here. Summing the whole tree matches the Max XP Plan total above.">Direct GE Cost</th>
                           <th className={styles.num}>{renderStackedHeader("Net", "remaining")}</th>
@@ -1712,7 +1712,7 @@ export default function XpGeCraftPage(): JSX.Element {
                             <td className={styles.num}>
                               <span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.count.toLocaleString()}</span>
                             </td>
-                            <td className={styles.num}>{row.mode === "click" && row.depth === 0 ? renderMaxManualInput(row.artifact) : "-"}</td>
+                            <td className={styles.num}>{renderMaxCraftInput(row.artifact)}</td>
                             <td className={styles.num}>{row.xp.toLocaleString()}</td>
                             <td className={styles.num}>{row.cost.toLocaleString()}</td>
                             <td className={styles.num}>{row.usage?.remaining.toLocaleString() ?? "-"}</td>
@@ -1745,7 +1745,7 @@ export default function XpGeCraftPage(): JSX.Element {
                           {renderFlatSortHeader("Tier", "tier", styles.num, "Sort by tier")}
                           {renderFlatSortHeader(renderStackedHeader("Manual", "crafts"), "manualCrafts", styles.num, "Sort by manual crafts")}
                           {renderFlatSortHeader(renderStackedHeader("Auto", "crafts"), "autoCrafts", styles.num, "Sort by auto crafts")}
-                          <th className={styles.num}>{renderStackedHeader("Max", "manual")}</th>
+                          <th className={styles.num}>{renderStackedHeader("Max", "crafts")}</th>
                           {renderFlatSortHeader("XP", "xp", styles.num)}
                           {renderFlatSortHeader("GE Cost", "cost", styles.num)}
                           {renderFlatSortHeader(renderStackedHeader("Net", "remaining"), "netRemaining", styles.num, "Sort by net remaining")}
@@ -1759,7 +1759,7 @@ export default function XpGeCraftPage(): JSX.Element {
                             <td className={styles.num}>T{row.tier}</td>
                             <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.manualCrafts.toLocaleString()}</span></td>
                             <td className={styles.num}><span className={styles.valueTooltip} title={getUsageTooltip(row.usage)}>{row.autoCrafts.toLocaleString()}</span></td>
-                            <td className={styles.num}>{renderMaxManualInput(row.artifact)}</td>
+                            <td className={styles.num}>{renderMaxCraftInput(row.artifact)}</td>
                             <td className={styles.num}>{row.xp.toLocaleString()}</td>
                             <td className={styles.num}>{row.cost.toLocaleString()}</td>
                             <td className={styles.num}>{row.netRemaining.toLocaleString()}</td>

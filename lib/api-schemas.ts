@@ -64,10 +64,21 @@ export const profileQuerySchema = z
 
 export type ProfileQuery = z.infer<typeof profileQuerySchema>;
 
+const plannerTargetSchema = z.object({
+  targetItemId: z.string().trim().min(1, "targetItemId is required"),
+  quantity: z.coerce
+    .number()
+    .finite()
+    .default(1)
+    .transform((value) => Math.max(1, Math.round(value)))
+    .pipe(nonNegativeIntSchema.max(1_000_000)),
+});
+
 export const planRequestSchema = z
   .object({
     eid: z.string().trim().default(""),
     targetItemId: z.string().trim().min(1, "targetItemId is required"),
+    targets: z.array(plannerTargetSchema).min(1).max(10).optional(),
     quantity: z.coerce
       .number()
       .finite()
@@ -98,6 +109,7 @@ export const planRequestSchema = z
   .transform((value) => ({
     eid: value.eid,
     targetItemId: value.targetItemId,
+    targets: value.targets,
     quantity: value.quantity,
     priorityTime: value.priorityTime,
     inventorySource: parseInventorySource(value.inventorySource),
@@ -172,6 +184,7 @@ const missionLaunchUpdateSchema = z.object({
 export const replanRequestSchema = z.object({
   profile: playerProfileSchema,
   targetItemId: z.string().trim().min(1, "targetItemId is required"),
+  targets: z.array(plannerTargetSchema).min(1).max(10).optional(),
   quantity: z.coerce
     .number()
     .finite()
@@ -240,6 +253,10 @@ const planTargetBreakdownSchema = z.object({
   shortfall: nonNegativeFiniteSchema,
 });
 
+const planTargetBreakdownRowSchema = planTargetBreakdownSchema.extend({
+  itemId: z.string().min(1),
+});
+
 const planProgressionLaunchSchema = z.object({
   ship: z.string().min(1),
   durationType: z.enum(DURATION_TYPES),
@@ -266,6 +283,7 @@ const availableComboSchema = z.object({
 export const plannerResultSchema = z.object({
   targetItemId: z.string().min(1),
   quantity: nonNegativeIntSchema,
+  targets: z.array(plannerTargetSchema),
   priorityTime: z.number().finite().min(0).max(1),
   geCost: nonNegativeFiniteSchema,
   totalSlotSeconds: nonNegativeIntSchema,
@@ -275,6 +293,7 @@ export const plannerResultSchema = z.object({
   missions: z.array(planMissionRowSchema),
   unmetItems: z.array(planUnmetItemSchema),
   targetBreakdown: planTargetBreakdownSchema,
+  targetBreakdowns: z.array(planTargetBreakdownRowSchema),
   progression: z.object({
     prepHours: nonNegativeFiniteSchema,
     prepLaunches: z.array(planProgressionLaunchSchema),
