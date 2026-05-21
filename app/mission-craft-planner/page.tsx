@@ -411,30 +411,24 @@ function laneOrderByLoad(loads: number[]): number[] {
 
 function distributeLaunchesAcrossLanes(launches: number, durationSeconds: number, laneLoads: number[]): number[] {
   const allocations = [0, 0, 0];
-  const projected = [...laneLoads];
   let remaining = Math.max(0, Math.round(launches));
   const safeDuration = Math.max(0, Math.round(durationSeconds));
   if (remaining <= 0 || safeDuration <= 0) {
     return allocations;
   }
 
+  const baseLaunches = Math.floor(remaining / 3);
+  for (let lane = 0; lane < 3; lane += 1) {
+    allocations[lane] = baseLaunches;
+    remaining -= baseLaunches;
+  }
+
+  const projected = laneLoads.map((load, lane) => load + allocations[lane] * safeDuration);
   while (remaining > 0) {
-    const order = laneOrderByLoad(projected);
-    const first = order[0];
-    const second = order[1];
-    const gap = projected[second] - projected[first];
-    let chunk = 1;
-    if (gap > 0) {
-      chunk = Math.ceil(gap / safeDuration);
-    } else {
-      const minLoad = projected[first];
-      const tiedCount = order.filter((lane) => Math.abs(projected[lane] - minLoad) < 1e-9).length;
-      chunk = Math.floor(remaining / Math.max(1, tiedCount));
-    }
-    const assign = Math.max(1, Math.min(remaining, chunk));
-    allocations[first] += assign;
-    projected[first] += assign * safeDuration;
-    remaining -= assign;
+    const lane = laneOrderByLoad(projected)[0];
+    allocations[lane] += 1;
+    projected[lane] += safeDuration;
+    remaining -= 1;
   }
 
   return allocations;
@@ -494,15 +488,56 @@ function timelineSegmentOrder(a: TimelineSegment, b: TimelineSegment): number {
   if (levelDiff !== 0) {
     return levelDiff;
   }
-  const targetDiff = (a.targetAfxId ?? Number.MAX_SAFE_INTEGER) - (b.targetAfxId ?? Number.MAX_SAFE_INTEGER);
-  if (targetDiff !== 0) {
-    return targetDiff;
-  }
   const rankDiff = timelineScheduleRank(b) - timelineScheduleRank(a);
   if (rankDiff !== 0) {
     return rankDiff;
   }
+  const totalDiff = b.totalSlotSeconds - a.totalSlotSeconds;
+  if (totalDiff !== 0) {
+    return totalDiff;
+  }
+  const launchDiff = b.launches - a.launches;
+  if (launchDiff !== 0) {
+    return launchDiff;
+  }
+  const targetDiff = (a.targetAfxId ?? Number.MAX_SAFE_INTEGER) - (b.targetAfxId ?? Number.MAX_SAFE_INTEGER);
+  if (targetDiff !== 0) {
+    return targetDiff;
+  }
   return a.id.localeCompare(b.id);
+}
+
+function timelinePhaseKey(segment: TimelineSegment): string {
+  if (segment.phase === "prep") {
+    return "prep";
+  }
+  return `mission:${segment.level ?? -1}`;
+}
+
+function timelinePhaseRank(segment: TimelineSegment): number {
+  if (segment.phase === "prep") {
+    return 0;
+  }
+  return 1 + (segment.level ?? 0);
+}
+
+function groupTimelineSegmentsByPhase(group: TimelineSegment[]): TimelineSegment[][] {
+  const phasesByKey = new Map<string, TimelineSegment[]>();
+  for (const segment of group) {
+    const key = timelinePhaseKey(segment);
+    const phase = phasesByKey.get(key) || [];
+    phase.push(segment);
+    phasesByKey.set(key, phase);
+  }
+  return Array.from(phasesByKey.values())
+    .map((phase) => phase.slice().sort(timelineSegmentOrder))
+    .sort((a, b) => {
+      const rankDiff = timelinePhaseRank(a[0]) - timelinePhaseRank(b[0]);
+      if (rankDiff !== 0) {
+        return rankDiff;
+      }
+      return (a[0]?.id || "").localeCompare(b[0]?.id || "");
+    });
 }
 
 function groupTimelineSegmentsForLaneBalance(segments: TimelineSegment[]): TimelineSegment[][] {
@@ -758,8 +793,12 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
 
   for (const group of groupTimelineSegmentsForLaneBalance(segments)) {
     let groupBarrierSeconds = 0;
-    for (const segment of group) {
-      groupBarrierSeconds = scheduleSegment(segment, groupBarrierSeconds);
+    for (const phase of groupTimelineSegmentsByPhase(group)) {
+      let nextBarrierSeconds = groupBarrierSeconds;
+      for (const segment of phase) {
+        nextBarrierSeconds = Math.max(nextBarrierSeconds, scheduleSegment(segment, groupBarrierSeconds));
+      }
+      groupBarrierSeconds = nextBarrierSeconds;
     }
   }
 
