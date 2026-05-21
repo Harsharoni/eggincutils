@@ -1201,6 +1201,7 @@ export default function XpGeCraftPage(): JSX.Element {
 
   const draftCraftLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
   const hasPendingCraftLimits = !craftLimitsEqual(draftCraftLimits, appliedCraftLimits);
+  const visibleCraftLimits = solution ? draftCraftLimits : appliedCraftLimits;
 
   function applyCraftLimitDrafts(): void {
     const nextLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
@@ -1669,9 +1670,9 @@ export default function XpGeCraftPage(): JSX.Element {
                           </>
                         )}
                       </div>
-                      {Object.keys(appliedCraftLimits).length > 0 && (
+                      {Object.keys(visibleCraftLimits).length > 0 && (
                         <div className={styles.limitChips}>
-                          {Object.entries(appliedCraftLimits).map(([artifact, limit]) => (
+                          {Object.entries(visibleCraftLimits).map(([artifact, limit]) => (
                             <button key={artifact} className={styles.limitChip} onClick={() => clearDraftCraftLimit(artifact)}>
                               {getArtifactDisplayLabel(artifact)}: {limit === 0 ? "excluded" : `max ${limit.toLocaleString()}`} x
                             </button>

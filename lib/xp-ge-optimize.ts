@@ -245,13 +245,10 @@ export function buildMaxXpExecutionPlan(
   saleEnabled: boolean = false
 ): MaxXpExecutionPlan {
   const plannedCounts = getPlannedCraftCounts(solution);
-  const demandCounts = getIngredientDemandCounts(recipes, plannedCounts);
-  const topLevelCounts = getTopLevelCraftCounts(plannedCounts, demandCounts);
   const initialInventory = cloneCountMap(inventory);
   const projectedCraftCounts = cloneCountMap(craftCounts);
   const remainingPlannedCounts = { ...plannedCounts };
   const usage = createUsageMap(inventory);
-  const orderedTopLevelArtifacts = getOrderedTopLevelArtifacts(topLevelCounts, artifactOrder);
   const steps: MaxXpExecutionPlanNode[] = [];
   let totalTopLevelCrafts = 0;
 
@@ -281,32 +278,19 @@ export function buildMaxXpExecutionPlan(
     }
   };
 
-  for (const artifact of orderedTopLevelArtifacts) {
-    const topLevelCount = topLevelCounts[artifact] || 0;
-    appendManualCrafts(artifact, topLevelCount);
-  }
-
   while (true) {
-    const remainingManualCounts = Object.fromEntries(
+    const remainingCounts = Object.fromEntries(
       Object.entries(remainingPlannedCounts).filter(([, count]) => count > 0)
     );
-    const orderedRemainingArtifacts = getOrderedTopLevelArtifacts(remainingManualCounts, artifactOrder);
+    const remainingDemandCounts = getIngredientDemandCounts(recipes, remainingCounts);
+    const remainingTopLevelCounts = getTopLevelCraftCounts(remainingCounts, remainingDemandCounts);
+    const orderedRemainingArtifacts = getOrderedTopLevelArtifacts(remainingTopLevelCounts, artifactOrder);
     if (orderedRemainingArtifacts.length === 0) {
       break;
     }
 
-    let progressed = false;
-    for (const artifact of orderedRemainingArtifacts) {
-      const remainingCount = remainingPlannedCounts[artifact] || 0;
-      if (remainingCount <= 0) {
-        continue;
-      }
-      appendManualCrafts(artifact, remainingCount);
-      progressed = true;
-    }
-    if (!progressed) {
-      break;
-    }
+    const artifact = orderedRemainingArtifacts[0];
+    appendManualCrafts(artifact, remainingTopLevelCounts[artifact] || 0);
   }
 
   const remainingArtifacts = Object.entries(remainingPlannedCounts).filter(([, count]) => count > 0);

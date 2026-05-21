@@ -77,6 +77,37 @@ describe("buildMaxXpExecutionPlan", () => {
     expect(plan.usage.tachyon_deflector_3.inventoryConsumed).toBe(5);
     expect(plan.usage.tachyon_deflector_3.consumedBy.tachyon_deflector_4).toBe(12);
   });
+
+  it("keeps promoted and originally top-level crafts in one main row", () => {
+    const plan = buildMaxXpExecutionPlan(
+      {
+        crafts: {
+          tachyon_deflector_4: solutionRow(1),
+          tachyon_deflector_3: solutionRow(65),
+        },
+        totalXp: 0,
+        totalCost: 0,
+      },
+      {
+        tachyon_deflector_3: 5,
+        tachyon_deflector_2: 650,
+        quantum_metronome_4: 65,
+        ship_in_a_bottle_4: 4,
+      },
+      {},
+      ["tachyon_deflector_4", "tachyon_deflector_3"]
+    );
+
+    expect(plan.steps.map((step) => `${step.mode}:${step.artifact}:${step.count}`)).toEqual([
+      "click:tachyon_deflector_4:1",
+      "click:tachyon_deflector_3:58",
+    ]);
+    expect(plan.steps[0].children.map((step) => `${step.mode}:${step.artifact}:${step.count}`)).toEqual([
+      "auto:tachyon_deflector_3:7",
+    ]);
+    expect(plan.usage.tachyon_deflector_3.manualCrafts).toBe(58);
+    expect(plan.usage.tachyon_deflector_3.autoCrafts).toBe(7);
+  });
 });
 
 describe("optimizeCrafts manual limits", () => {
