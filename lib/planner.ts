@@ -6,6 +6,7 @@ import {
   buildMissionOptions,
   computeShipLevelsFromLaunchCounts,
   DurationType,
+  getNominalMissionCapacity,
   getShipOrder,
   MissionOption,
   ShipLaunchCounts,
@@ -182,6 +183,8 @@ const MAX_CRAFT_COUNT_FOR_DISCOUNT = 300;
 const MAX_CRAFT_DISCOUNT_PIECEWISE_STEPS = 10;
 const MAX_DISCOUNT_FACTOR = 0.9;
 const DISCOUNT_CURVE_EXPONENT = 0.2;
+const MIN_MISSION_TARGET_SAMPLE_LAUNCHES = 10;
+const MIN_MISSION_TARGET_SAMPLE_DROPS = 500;
 const MISSION_SOLVER_UNMET_PENALTY_FACTOR = 1000;
 const SCORE_EPS = 1e-9;
 const PROGRESSION_MAX_DEPTH = 4;
@@ -579,6 +582,21 @@ function yieldsFromTarget(
   return yields;
 }
 
+function hasEnoughMissionTargetSample(
+  target: MissionTargetLootStore,
+  option: MissionOption,
+  lootLevel: number
+): boolean {
+  if (target.totalDrops < MIN_MISSION_TARGET_SAMPLE_DROPS) {
+    return false;
+  }
+  const nominalCapacity = getNominalMissionCapacity(option.ship, option.durationType, lootLevel) || option.capacity;
+  if (nominalCapacity <= 0) {
+    return false;
+  }
+  return target.totalDrops / nominalCapacity >= MIN_MISSION_TARGET_SAMPLE_LAUNCHES;
+}
+
 async function buildMissionActionsForOptions(
   missionOptions: MissionOption[],
   relevantItems: Set<string>,
@@ -604,6 +622,9 @@ async function buildMissionActionsForOptions(
     }
 
     for (const target of levelLoot.targets) {
+      if (!hasEnoughMissionTargetSample(target, option, levelLoot.level)) {
+        continue;
+      }
       const yields = yieldsFromTarget(target, relevantItems, option.capacity, includeShinyRarities);
       if (Object.keys(yields).length === 0) {
         continue;

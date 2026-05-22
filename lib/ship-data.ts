@@ -188,6 +188,15 @@ export function getShipOrder(): string[] {
   return SHIP_ORDER;
 }
 
+export function getNominalMissionCapacity(ship: string, durationType: DurationType, level: number): number | null {
+  const entry = shipConfig.find((candidate) => candidate.ship === ship);
+  const params = entry?.durations.find((duration) => duration.durationType === durationType);
+  if (!params) {
+    return null;
+  }
+  return Math.floor(params.capacity + params.levelCapacityBump * Math.max(0, Math.round(level)));
+}
+
 export function shipLevelsToLaunchCounts(shipLevels: ShipLevelInfo[]): ShipLaunchCounts {
   const launchCounts = initializeLaunchCounts();
   const byShip = new Map(shipLevels.map((entry) => [entry.ship, entry]));

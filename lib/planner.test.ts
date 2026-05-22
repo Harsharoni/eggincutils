@@ -76,14 +76,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 8,
                       afxLevel: 4,
                       itemId: "ornate-gusset-4",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -129,14 +129,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 7,
                       afxLevel: 2,
                       itemId: "vial-martian-dust-2",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -181,14 +181,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -227,6 +227,60 @@ describe("planForTarget coverage handling", () => {
     expect(result.notes.some((note) => note.includes("unified HiGHS model"))).toBe(true);
   });
 
+  it("filters mission target rows with too few estimated launches or drops", async () => {
+    mockedLoadLootData.mockResolvedValue({
+      missions: [
+        {
+          afxShip: 10,
+          afxDurationType: 1,
+          missionId: "atreggies-standard",
+          levels: [
+            {
+              level: 0,
+              targets: [
+                {
+                  totalDrops: 499,
+                  targetAfxId: 1,
+                  items: [{ afxId: 23, afxLevel: 1, itemId: "puzzle-cube-1", counts: [499, 0, 0, 0] }],
+                },
+                {
+                  totalDrops: 600,
+                  targetAfxId: 2,
+                  items: [{ afxId: 23, afxLevel: 1, itemId: "puzzle-cube-1", counts: [600, 0, 0, 0] }],
+                },
+                {
+                  totalDrops: 1000,
+                  targetAfxId: 10000,
+                  items: [{ afxId: 23, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1000, 0, 0, 0] }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    mockedSolveWithHighs.mockResolvedValue({
+      Status: "Optimal",
+      Columns: { m_0: { Primal: 1 } },
+    });
+
+    const profile = baseProfile();
+    profile.missionOptions = [
+      {
+        ship: "ATREGGIES",
+        missionId: "atreggies-standard",
+        durationType: "LONG",
+        level: 0,
+        durationSeconds: 259_200,
+        capacity: 78,
+      },
+    ];
+
+    const result = await planForTarget(profile, "puzzle-cube-1", 1, 0.5);
+    expect(result.missions).toHaveLength(1);
+    expect(result.missions[0].targetAfxId).toBe(10000);
+  });
+
   it("respects allowedShipDurations by filtering mission options before solve", async () => {
     mockedLoadLootData.mockResolvedValue({
       missions: [
@@ -239,14 +293,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -263,14 +317,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -335,14 +389,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -388,14 +442,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -407,7 +461,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     let lpModel = "";
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       lpModel = model;
       return {
         Status: "Optimal",
@@ -455,14 +509,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -474,7 +528,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     let lpModel = "";
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       lpModel = model;
       return {
         Status: "Optimal",
@@ -513,14 +567,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -537,14 +591,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -554,14 +608,14 @@ describe("planForTarget coverage handling", () => {
               level: 1,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [2, 0, 0, 0],
+                      counts: [10000, 0, 0, 0],
                     },
                   ],
                 },
@@ -626,14 +680,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -650,14 +704,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -735,20 +789,20 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 12,
                       afxLevel: 2,
                       itemId: "soul-stone-2",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                     {
                       afxId: 12,
                       afxLevel: 1,
                       itemId: "soul-stone-1",
-                      counts: [20, 0, 0, 0],
+                      counts: [100000, 0, 0, 0],
                     },
                   ],
                 },
@@ -806,14 +860,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -867,14 +921,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -886,7 +940,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     const solvedModels: string[] = [];
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       solvedModels.push(model);
       return {
         Status: "Optimal",
@@ -936,20 +990,20 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                     {
                       afxId: 7,
                       afxLevel: 2,
                       itemId: "vial-martian-dust-2",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -961,7 +1015,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     const solvedModels: string[] = [];
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       solvedModels.push(model);
       return {
         Status: "Optimal",
@@ -1017,14 +1071,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -1036,7 +1090,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     const solvedModels: string[] = [];
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       solvedModels.push(model);
       if (model.includes("d_0:")) {
         return {
@@ -1097,9 +1151,9 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
-                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1, 0, 0, 0] }],
+                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
                 },
               ],
             },
@@ -1114,9 +1168,9 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
-                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1, 0, 0, 0] }],
+                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
                 },
               ],
             },
@@ -1125,7 +1179,7 @@ describe("planForTarget coverage handling", () => {
       ],
     });
 
-    mockedSolveWithHighs.mockImplementation(async (model) => {
+    mockedSolveWithHighs.mockImplementation(async (model): Promise<HighsSolveResult> => {
       const demandLine = model.split("\n").find((line) => line.trimStart().startsWith("b_0:")) || "";
       const isSmallBlock = demandLine.includes(">= 1");
       return {
@@ -1180,9 +1234,9 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 7,
+                  totalDrops: 7000,
                   targetAfxId: 10000,
-                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1, 0, 0, 0] }],
+                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1000, 0, 0, 0] }],
                 },
               ],
             },
@@ -1190,9 +1244,9 @@ describe("planForTarget coverage handling", () => {
               level: 1,
               targets: [
                 {
-                  totalDrops: 4,
+                  totalDrops: 4000,
                   targetAfxId: 10000,
-                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1, 0, 0, 0] }],
+                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1000, 0, 0, 0] }],
                 },
               ],
             },
@@ -1238,7 +1292,7 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [],
                 },
@@ -1248,9 +1302,9 @@ describe("planForTarget coverage handling", () => {
               level: 1,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
-                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [1, 0, 0, 0] }],
+                  items: [{ afxId: 1, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
                 },
               ],
             },
@@ -1295,14 +1349,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -1360,20 +1414,20 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 10,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 2,
                       itemId: "prophecy-stone-2",
-                      counts: [8, 0, 0, 0],
+                      counts: [4000, 0, 0, 0],
                     },
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "prophecy-stone-1",
-                      counts: [120, 0, 0, 0],
+                      counts: [60000, 0, 0, 0],
                     },
                   ],
                 },
@@ -1385,7 +1439,7 @@ describe("planForTarget coverage handling", () => {
     });
 
     let polishOptions: Record<string, string | number | boolean> | undefined;
-    mockedSolveWithHighs.mockImplementation(async (model, options) => {
+    mockedSolveWithHighs.mockImplementation(async (model, options): Promise<HighsSolveResult> => {
       const isGePolish = model.includes("ts_0:");
       if (isGePolish) {
         polishOptions = options;
@@ -1437,14 +1491,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0],
+                      counts: [5000, 0, 0, 0],
                     },
                   ],
                 },
@@ -1489,14 +1543,14 @@ describe("planForTarget coverage handling", () => {
               level: 0,
               targets: [
                 {
-                  totalDrops: 1,
+                  totalDrops: 5000,
                   targetAfxId: 10000,
                   items: [
                     {
                       afxId: 1,
                       afxLevel: 1,
                       itemId: "puzzle-cube-1",
-                      counts: [1, 0, 0, 0] as [number, number, number, number],
+                      counts: [5000, 0, 0, 0] as [number, number, number, number],
                     },
                   ],
                 },
