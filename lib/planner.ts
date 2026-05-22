@@ -14,6 +14,7 @@ import {
   shipLevelsToLaunchCounts,
 } from "./ship-data";
 import type { PlayerProfile } from "./profile";
+import { getVirtueFuelPerLaunch } from "./virtue-fuel";
 
 async function getDefaultSolverFn(): Promise<SolverFunction> {
   const { solveWithHighs } = await import("./highs");
@@ -109,7 +110,9 @@ export type PlannerResult = {
   quantity: number;
   targets: PlannerTarget[];
   priorityTime: number;
+  objectiveMode: MissionObjectiveMode;
   geCost: number;
+  fuelCost: number;
   totalSlotSeconds: number;
   expectedHours: number;
   weightedScore: number;
@@ -127,6 +130,8 @@ export type PlannerResult = {
   availableCombos: AvailableCombo[];
 };
 
+export type MissionObjectiveMode = "ge" | "virtueFuel";
+
 export type SolverFunction = (
   model: string,
   options?: Record<string, string | number | boolean>
@@ -134,6 +139,8 @@ export type SolverFunction = (
 
 export type PlannerOptions = {
   targets?: PlannerTarget[];
+  objectiveMode?: MissionObjectiveMode;
+  minimumTimePriority?: number;
   fastMode?: boolean;
   targetCraftedOnly?: boolean;
   missionDropRarities?: Partial<ShinyRaritySelection>;
@@ -202,6 +209,8 @@ const PHASED_BUDGET_LAUNCHES = 5000;
 const BINARY_BIG_M = 5000;
 const LP_SCREENING_MILP_RESOLVES = 2;
 const NORMAL_GE_POLISH_TIME_LIMIT_SECONDS = 20;
+const VIRTUE_FUEL_MIN_TIME_PRIORITY = 0.15;
+const VIRTUE_GE_TIEBREAKER_WEIGHT = 1e-9;
 const FAST_QUANTITY_ACCELERATION_MIN_QUANTITY = 5;
 const FAST_QUANTITY_ACCELERATION_MAX_BLOCK_QUANTITY = 5;
 const NORMAL_SCALED_INCUMBENT_MAX_MILP_RESOLVES = 2;
@@ -313,6 +322,71 @@ export function normalizedScore(ge: number, timeSec: number, priorityTime: numbe
   const safeGeRef = Math.max(1, geRef);
   const safeTimeRef = Math.max(1, timeRef);
   return (1 - priorityTime) * (ge / safeGeRef) + priorityTime * (timeSec / safeTimeRef);
+}
+
+type ObjectiveContext = {
+  mode: MissionObjectiveMode;
+  priorityTime: number;
+  resourceWeight: number;
+  timeWeight: number;
+  minimumTimePriority: number;
+};
+
+function normalizeObjectiveContext(
+  modeRaw: MissionObjectiveMode | undefined,
+  priorityTimeRaw: number,
+  minimumTimePriorityRaw?: number
+): ObjectiveContext {
+  const mode: MissionObjectiveMode = modeRaw === "virtueFuel" ? "virtueFuel" : "ge";
+  const priorityTime = Math.max(0, Math.min(1, priorityTimeRaw));
+  if (mode === "virtueFuel") {
+    const minimumTimePriority = Math.max(
+      0,
+      Math.min(
+        0.95,
+        Number.isFinite(minimumTimePriorityRaw as number)
+          ? minimumTimePriorityRaw as number
+          : VIRTUE_FUEL_MIN_TIME_PRIORITY
+      )
+    );
+    const timeWeight = minimumTimePriority + priorityTime * (1 - minimumTimePriority);
+    return {
+      mode,
+      priorityTime,
+      resourceWeight: 1 - timeWeight,
+      timeWeight,
+      minimumTimePriority,
+    };
+  }
+  return {
+    mode,
+    priorityTime,
+    resourceWeight: 1 - priorityTime,
+    timeWeight: priorityTime,
+    minimumTimePriority: 0,
+  };
+}
+
+function normalizedObjectiveScore(resourceCost: number, timeSec: number, context: ObjectiveContext, resourceRef: number, timeRef: number): number {
+  const safeResourceRef = Math.max(1, resourceRef);
+  const safeTimeRef = Math.max(1, timeRef);
+  return context.resourceWeight * (resourceCost / safeResourceRef) + context.timeWeight * (timeSec / safeTimeRef);
+}
+
+function missionFuelCost(actions: MissionAction[], missionCounts: Record<string, number>): number {
+  const actionByKey = new Map(actions.map((action) => [action.key, action]));
+  return Object.entries(missionCounts).reduce((sum, [actionKey, launchesRaw]) => {
+    const action = actionByKey.get(actionKey);
+    const launches = Math.max(0, Math.round(launchesRaw));
+    if (!action || launches <= 0) {
+      return sum;
+    }
+    return sum + launches * getVirtueFuelPerLaunch(action.ship, action.durationType);
+  }, 0);
+}
+
+function objectiveResourceCost(context: ObjectiveContext, geCost: number, fuelCost: number): number {
+  return context.mode === "virtueFuel" ? fuelCost : geCost;
 }
 
 function laneOrderByLoad(loads: number[]): number[] {
@@ -709,13 +783,28 @@ function bestTimePerUnit(itemKey: string, actions: MissionAction[]): number {
   return best;
 }
 
+function bestFuelPerUnit(itemKey: string, actions: MissionAction[]): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const action of actions) {
+    const yieldPerMission = action.yields[itemKey] || 0;
+    if (yieldPerMission <= 0) {
+      continue;
+    }
+    const fuelPerItem = getVirtueFuelPerLaunch(action.ship, action.durationType) / yieldPerMission;
+    if (fuelPerItem < best) {
+      best = fuelPerItem;
+    }
+  }
+  return best;
+}
+
 function computeObjectiveReferences(options: {
   profile: PlayerProfile;
   targetKey: string;
   quantity: number;
   actions: MissionAction[];
   targetDemandByItem?: Map<string, number>;
-}): { geRef: number; timeRef: number } {
+}): { geRef: number; fuelRef: number; timeRef: number } {
   const { profile, targetKey, quantity, actions } = options;
   const quantityInt = Math.max(1, Math.round(quantity));
   const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
@@ -757,8 +846,26 @@ function computeObjectiveReferences(options: {
     const fastestActionDuration = actions.length > 0 ? Math.min(...actions.map((action) => action.durationSeconds)) : 3600;
     timeRef = fastestActionDuration / 3;
   }
+  let fuelRef = 0;
+  let hasFiniteTargetFuel = false;
+  for (const [itemKey, demandQty] of targetDemandByItem.entries()) {
+    const targetFuelPerUnit = bestFuelPerUnit(itemKey, actions);
+    if (Number.isFinite(targetFuelPerUnit)) {
+      fuelRef += targetFuelPerUnit * Math.max(1, Math.round(demandQty));
+      hasFiniteTargetFuel = true;
+    }
+  }
+  if (!hasFiniteTargetFuel) {
+    fuelRef = Number.POSITIVE_INFINITY;
+  }
+  if (!Number.isFinite(fuelRef)) {
+    fuelRef = actions.length > 0
+      ? Math.max(...actions.map((action) => getVirtueFuelPerLaunch(action.ship, action.durationType)))
+      : 1;
+  }
   return {
     geRef,
+    fuelRef: Math.max(1, fuelRef),
     timeRef: Math.max(1, timeRef),
   };
 }
@@ -1151,9 +1258,12 @@ async function solveUnifiedCraftMissionPlan(options: {
   targetKey: string;
   quantity: number;
   priorityTime: number;
+  objectiveMode?: MissionObjectiveMode;
+  minimumTimePriority?: number;
   closure: Set<string>;
   actions: MissionAction[];
   geRef: number;
+  fuelRef?: number;
   timeRef: number;
   requiredMissionLaunches?: Record<string, RequiredMissionLaunchConstraint>;
   maxMissionLaunchesByOption?: Record<string, number>;
@@ -1175,9 +1285,12 @@ async function solveUnifiedCraftMissionPlan(options: {
     targetKey,
     quantity,
     priorityTime,
+    objectiveMode,
+    minimumTimePriority,
     closure,
     actions,
     geRef,
+    fuelRef = 1,
     timeRef,
     requiredMissionLaunches = {},
     maxMissionLaunchesByOption = {},
@@ -1205,7 +1318,9 @@ async function solveUnifiedCraftMissionPlan(options: {
   } = craftSkeleton || buildCraftModelSkeleton({ profile, targetKey, quantity, closure });
   const missionVars = actions.map((_, index) => `m_${index}`);
   const normalizedGeRef = Math.max(1, geRef);
+  const normalizedFuelRef = Math.max(1, fuelRef);
   const normalizedTimeRef = Math.max(1, timeRef);
+  const objectiveContext = normalizeObjectiveContext(objectiveMode, priorityTime, minimumTimePriority);
 
   const lines: string[] = [];
   lines.push("Minimize");
@@ -1220,7 +1335,9 @@ async function solveUnifiedCraftMissionPlan(options: {
         coefficient: geCoeff,
         variable: model.preDiscountStepVars[index],
       });
-      const coefficient = ((1 - priorityTime) * geCoeff) / normalizedGeRef;
+      const coefficient = objectiveContext.mode === "ge"
+        ? (objectiveContext.resourceWeight * geCoeff) / normalizedGeRef
+        : (VIRTUE_GE_TIEBREAKER_WEIGHT * geCoeff) / normalizedGeRef;
       objectiveTerms.push({
         coefficient,
         variable: model.preDiscountStepVars[index],
@@ -1236,7 +1353,9 @@ async function solveUnifiedCraftMissionPlan(options: {
         coefficient: tailCost,
         variable: model.tailVar,
       });
-      const coefficient = ((1 - priorityTime) * tailCost) / normalizedGeRef;
+      const coefficient = objectiveContext.mode === "ge"
+        ? (objectiveContext.resourceWeight * tailCost) / normalizedGeRef
+        : (VIRTUE_GE_TIEBREAKER_WEIGHT * tailCost) / normalizedGeRef;
       objectiveTerms.push({
         coefficient,
         variable: model.tailVar,
@@ -1245,12 +1364,16 @@ async function solveUnifiedCraftMissionPlan(options: {
     }
   }
 
-  const missionObjectiveWeight = strictGeObjective ? 0 : Math.max(priorityTime, MIN_MISSION_TIME_OBJECTIVE_WEIGHT);
+  const missionObjectiveWeight = strictGeObjective ? 0 : Math.max(objectiveContext.timeWeight, MIN_MISSION_TIME_OBJECTIVE_WEIGHT);
   if (missionObjectiveWeight > 0) {
     const missionLaunchTiebreakCoeff = (missionObjectiveWeight * MISSION_LAUNCH_TIEBREAKER_SECONDS) / normalizedTimeRef;
     const targetedTiebreakCoeff = (missionObjectiveWeight * TARGETED_MISSION_TIEBREAKER_SECONDS) / normalizedTimeRef;
     for (let index = 0; index < actions.length; index += 1) {
+      const fuelCoeff = objectiveContext.mode === "virtueFuel"
+        ? (objectiveContext.resourceWeight * getVirtueFuelPerLaunch(actions[index].ship, actions[index].durationType)) / normalizedFuelRef
+        : 0;
       const coefficient =
+        fuelCoeff +
         (missionObjectiveWeight * (actions[index].durationSeconds / 3)) / normalizedTimeRef +
         missionLaunchTiebreakCoeff +
         (isUntargetedTargetAfxId(actions[index].targetAfxId) ? 0 : targetedTiebreakCoeff);
@@ -3561,11 +3684,12 @@ async function planForTargetHeuristic(
   targetItemId: string,
   quantity: number,
   priorityTimeRaw: number,
-  plannerOptions: Pick<PlannerOptions, "missionDropRarities" | "targetCraftedOnly" | "solverFn" | "lootData"> = {}
+  plannerOptions: Pick<PlannerOptions, "missionDropRarities" | "targetCraftedOnly" | "solverFn" | "lootData" | "objectiveMode" | "minimumTimePriority"> = {}
 ): Promise<PlannerResult> {
   const targetKey = itemIdToCanonicalKey(targetItemId);
   const priorityTime = Math.max(0, Math.min(1, priorityTimeRaw));
-  const effectivePriorityTime = Math.max(priorityTime, MIN_MISSION_TIME_OBJECTIVE_WEIGHT);
+  const objectiveContext = normalizeObjectiveContext(plannerOptions.objectiveMode, priorityTime, plannerOptions.minimumTimePriority);
+  const effectivePriorityTime = Math.max(objectiveContext.timeWeight, MIN_MISSION_TIME_OBJECTIVE_WEIGHT);
   const quantityInt = Math.max(1, Math.round(quantity));
   const missionDropRarities = normalizeShinyRaritySelection(plannerOptions.missionDropRarities);
   const targetCraftedOnly = Boolean(plannerOptions.targetCraftedOnly);
@@ -3587,7 +3711,7 @@ async function planForTargetHeuristic(
   const crafts: Record<string, number> = {};
   const demand: Record<string, number> = {};
 
-  const { geRef, timeRef } = computeObjectiveReferences({
+  const { geRef, fuelRef, timeRef } = computeObjectiveReferences({
     profile,
     targetKey,
     quantity: quantityInt,
@@ -3624,7 +3748,9 @@ async function planForTargetHeuristic(
 
       const nextCraftCount = craftCounts[itemKey] || 0;
       const craftGe = getDiscountedCost(recipe.cost, nextCraftCount);
-      const craftScore = normalizedScore(craftGe, 0, effectivePriorityTime, geRef, timeRef);
+      const craftScore = objectiveContext.mode === "ge"
+        ? normalizedScore(craftGe, 0, effectivePriorityTime, geRef, timeRef)
+        : Number.POSITIVE_INFINITY;
 
       const farmTpu = bestTimePerUnit(itemKey, actions);
       const farmScore = Number.isFinite(farmTpu)
@@ -3662,17 +3788,18 @@ async function planForTargetHeuristic(
   const missionAllocation = await allocateMissionsWithSolver(actions, remainingDemand, plannerOptions.solverFn);
   const missionCounts = missionAllocation.missionCounts;
   const totalSlotSeconds = missionAllocation.totalSlotSeconds;
+  const fuelCost = missionFuelCost(actions, missionCounts);
   const remainingDemandAfterMissions = missionAllocation.remainingDemand;
 
   const expectedHours = estimateThreeSlotExpectedHours({
     actions,
     missionCounts,
   });
-  const weightedScore = normalizedScore(
-    geCost,
+  const weightedScore = normalizedObjectiveScore(
+    objectiveResourceCost(objectiveContext, geCost, fuelCost),
     totalSlotSeconds / 3,
-    priorityTime,
-    geRef,
+    objectiveContext,
+    objectiveContext.mode === "virtueFuel" ? fuelRef : geRef,
     timeRef
   );
 
@@ -3745,7 +3872,9 @@ async function planForTargetHeuristic(
     quantity: quantityInt,
     targets: [{ targetItemId: itemKeyToId(targetKey), quantity: quantityInt }],
     priorityTime,
+    objectiveMode: objectiveContext.mode,
     geCost,
+    fuelCost,
     totalSlotSeconds,
     expectedHours,
     weightedScore,
@@ -3774,6 +3903,12 @@ export async function planForTarget(
   const normalizedTargets = normalizePlannerTargets(targetItemId, quantity, plannerOptions.targets);
   const targetKey = normalizedTargets.primaryTargetKey;
   const priorityTime = Math.max(0, Math.min(1, priorityTimeRaw));
+  const objectiveContext = normalizeObjectiveContext(
+    plannerOptions.objectiveMode,
+    priorityTime,
+    plannerOptions.minimumTimePriority
+  );
+  const objectiveMode = objectiveContext.mode;
   const quantityInt = normalizedTargets.primaryQuantity;
   const multiTarget = normalizedTargets.targets.length > 1;
   const fastMode = Boolean(plannerOptions.fastMode);
@@ -3875,6 +4010,8 @@ export async function planForTarget(
     try {
       fastIncumbentResult = await planForTarget(profile, targetItemId, quantityInt, priorityTime, {
         fastMode: true,
+        objectiveMode,
+        minimumTimePriority: objectiveContext.minimumTimePriority,
         targetCraftedOnly,
         missionDropRarities,
         allowedShipDurations: plannerOptions.allowedShipDurations,
@@ -3901,16 +4038,18 @@ export async function planForTarget(
     }
     const fastHours = Math.max(0, fastIncumbentResult.expectedHours);
     const normalHours = Math.max(0, normalResult.expectedHours);
-    const fastGe = Math.max(0, fastIncumbentResult.geCost);
-    const normalGe = Math.max(0, normalResult.geCost);
-    if (fastHours + 1 / 3600 < normalHours && fastGe <= normalGe + SCORE_EPS) {
+    const fastResource = Math.max(0, objectiveResourceCost(objectiveContext, fastIncumbentResult.geCost, fastIncumbentResult.fuelCost));
+    const normalResource = Math.max(0, objectiveResourceCost(objectiveContext, normalResult.geCost, normalResult.fuelCost));
+    if (fastHours + 1 / 3600 < normalHours && fastResource <= normalResource + SCORE_EPS) {
       return true;
     }
-    if (fastHours <= normalHours * 0.99 && fastGe <= normalGe * 1.05 + SCORE_EPS) {
+    if (fastHours <= normalHours * 0.99 && fastResource <= normalResource * 1.05 + SCORE_EPS) {
       return true;
     }
-    const fastScore = normalizedScore(fastGe, fastIncumbentResult.totalSlotSeconds / 3, priorityTime, normalGe || 1, normalResult.totalSlotSeconds / 3 || 1);
-    const normalScore = normalizedScore(normalGe, normalResult.totalSlotSeconds / 3, priorityTime, normalGe || 1, normalResult.totalSlotSeconds / 3 || 1);
+    const resourceRef = Math.max(1, fastResource, normalResource);
+    const timeRef = Math.max(1, normalResult.totalSlotSeconds / 3);
+    const fastScore = normalizedObjectiveScore(fastResource, fastIncumbentResult.totalSlotSeconds / 3, objectiveContext, resourceRef, timeRef);
+    const normalScore = normalizedObjectiveScore(normalResource, normalResult.totalSlotSeconds / 3, objectiveContext, resourceRef, timeRef);
     return fastScore + SCORE_EPS < normalScore && fastHours <= normalHours * 1.01;
   };
   const maybeAdoptFastIncumbentResult = (normalResult: PlannerResult): PlannerResult => {
@@ -3956,7 +4095,9 @@ export async function planForTarget(
         return deduped;
       })();
 
-  const fastCandidateLimit = priorityTime <= SCORE_EPS ? NORMAL_MODE_MAX_CANDIDATES : FAST_MODE_MAX_CANDIDATES;
+  const fastCandidateLimit = objectiveMode === "ge" && priorityTime <= SCORE_EPS
+    ? NORMAL_MODE_MAX_CANDIDATES
+    : FAST_MODE_MAX_CANDIDATES;
   const candidateLimit = fastMode ? fastCandidateLimit : NORMAL_MODE_MAX_CANDIDATES;
   const progressionCandidates = progressionDeduped.unique.slice(0, candidateLimit);
   const candidateReuseKey = [
@@ -3966,7 +4107,7 @@ export async function planForTarget(
     `qty:${solveQuantity}`,
     `rar:${missionDropRarityKey}`,
     `craftedOnly:${targetCraftedOnly ? 1 : 0}`,
-    `mode:${priorityTime <= SCORE_EPS ? "ge" : "mix"}`,
+    `mode:${objectiveMode}:${priorityTime <= SCORE_EPS ? "ge" : "mix"}:${objectiveContext.minimumTimePriority}`,
     `fast:${fastMode ? 1 : 0}`,
   ].join("::");
   const preferredCandidateFingerprint = bestCandidateFingerprintCache.get(candidateReuseKey);
@@ -4020,7 +4161,7 @@ export async function planForTarget(
     targetDemandByItem: solveTargetDemandByItem,
   });
 
-  const { geRef, timeRef } = computeObjectiveReferences({
+  const { geRef, fuelRef, timeRef } = computeObjectiveReferences({
     profile: representativeBlockProfile,
     targetKey,
     quantity: solveQuantity,
@@ -4106,6 +4247,7 @@ export async function planForTarget(
             totalSlotSeconds: number;
             weightedScore: number;
             geCost: number;
+            fuelCost: number;
             unmetTotal: number;
             totalLaunches: number;
             prepNoYieldSlotSeconds: number;
@@ -4209,7 +4351,7 @@ export async function planForTarget(
       lpRelaxation: boolean,
       milpProgressContext?: MilpSolveProgressContext
     ) => {
-      const geOnlyCandidateMilp = !lpRelaxation && priorityTime <= SCORE_EPS;
+      const geOnlyCandidateMilp = objectiveMode === "ge" && !lpRelaxation && priorityTime <= SCORE_EPS;
       if (!lpRelaxation) {
         await emitMilpStageProgress(
           milpProgressContext,
@@ -4222,9 +4364,12 @@ export async function planForTarget(
         targetKey,
         quantity: solveQuantity,
         priorityTime,
+        objectiveMode,
+        minimumTimePriority: objectiveContext.minimumTimePriority,
         closure,
         actions: input.candidateActions,
         geRef,
+        fuelRef,
         timeRef,
         requiredMissionLaunches: input.requiredMissionLaunches,
         maxMissionLaunchesByOption: input.maxMissionLaunchesByOption,
@@ -4255,9 +4400,12 @@ export async function planForTarget(
             targetKey,
             quantity: solveQuantity,
             priorityTime: 1,
+            objectiveMode,
+            minimumTimePriority: objectiveContext.minimumTimePriority,
             closure,
             actions: input.candidateActions,
             geRef,
+            fuelRef,
             timeRef,
             requiredMissionLaunches: input.requiredMissionLaunches,
             maxMissionLaunchesByOption: input.maxMissionLaunchesByOption,
@@ -4280,11 +4428,12 @@ export async function planForTarget(
         }
       }
       const totalSlotSeconds = input.prepNoYieldSlotSeconds + unified.totalSlotSeconds;
-      const weightedScore = normalizedScore(
-        unified.geCost,
+      const fuelCost = missionFuelCost(input.candidateActions, unified.missionCounts);
+      const weightedScore = normalizedObjectiveScore(
+        objectiveResourceCost(objectiveContext, unified.geCost, fuelCost),
         totalSlotSeconds / 3,
-        priorityTime,
-        geRef,
+        objectiveContext,
+        objectiveMode === "virtueFuel" ? fuelRef : geRef,
         timeRef
       );
       const unmetTotal = Object.values(unified.remainingDemand).reduce((sum, qty) => sum + Math.max(0, qty), 0);
@@ -4298,6 +4447,7 @@ export async function planForTarget(
         totalSlotSeconds,
         weightedScore,
         geCost: unified.geCost,
+        fuelCost,
         unmetTotal,
         totalLaunches,
       };
@@ -4314,25 +4464,27 @@ export async function planForTarget(
       return Math.max(0, Math.round((total - completed) * avgPerStepMs));
     };
     const comparePlanQuality = (
-      a: { unmetTotal: number; weightedScore: number; geCost: number; totalSlotSeconds: number; totalLaunches: number },
-      b: { unmetTotal: number; weightedScore: number; geCost: number; totalSlotSeconds: number; totalLaunches: number }
+      a: { unmetTotal: number; weightedScore: number; geCost: number; fuelCost: number; totalSlotSeconds: number; totalLaunches: number },
+      b: { unmetTotal: number; weightedScore: number; geCost: number; fuelCost: number; totalSlotSeconds: number; totalLaunches: number }
     ): number => {
       const unmetDiff = a.unmetTotal - b.unmetTotal;
       if (Math.abs(unmetDiff) > 1e-6) {
         return unmetDiff;
       }
 
-      const geScale = Math.max(1, Math.min(Math.abs(a.geCost), Math.abs(b.geCost)));
-      const geTieThreshold = Math.max(1, geScale * PLAN_SCORE_TIE_TOLERANCE_FRACTION);
-      const geDiff = a.geCost - b.geCost;
-      const geTied = Math.abs(geDiff) <= geTieThreshold;
+      const resourceA = objectiveResourceCost(objectiveContext, a.geCost, a.fuelCost);
+      const resourceB = objectiveResourceCost(objectiveContext, b.geCost, b.fuelCost);
+      const resourceScale = Math.max(1, Math.min(Math.abs(resourceA), Math.abs(resourceB)));
+      const resourceTieThreshold = Math.max(1, resourceScale * PLAN_SCORE_TIE_TOLERANCE_FRACTION);
+      const resourceDiff = resourceA - resourceB;
+      const resourceTied = Math.abs(resourceDiff) <= resourceTieThreshold;
 
       const slotScale = Math.max(1, Math.min(Math.abs(a.totalSlotSeconds), Math.abs(b.totalSlotSeconds)));
       const slotTieThreshold = Math.max(1, slotScale * PLAN_SCORE_TIE_TOLERANCE_FRACTION);
       const slotSecondsDiff = a.totalSlotSeconds - b.totalSlotSeconds;
       const timeTied = Math.abs(slotSecondsDiff) <= slotTieThreshold;
 
-      if (geTied && timeTied) {
+      if (resourceTied && timeTied) {
         const launchDiff = a.totalLaunches - b.totalLaunches;
         if (launchDiff !== 0) {
           return launchDiff;
@@ -4348,6 +4500,10 @@ export async function planForTarget(
       if (Math.abs(slotSecondsDiff) > SCORE_EPS) {
         return slotSecondsDiff;
       }
+      if (Math.abs(resourceDiff) > SCORE_EPS) {
+        return resourceDiff;
+      }
+      const geDiff = a.geCost - b.geCost;
       if (Math.abs(geDiff) > SCORE_EPS) {
         return geDiff;
       }
@@ -4355,7 +4511,7 @@ export async function planForTarget(
     };
     const shouldReplaceBest = (
       current: typeof best,
-      next: { unmetTotal: number; weightedScore: number; geCost: number; totalSlotSeconds: number; totalLaunches: number }
+      next: { unmetTotal: number; weightedScore: number; geCost: number; fuelCost: number; totalSlotSeconds: number; totalLaunches: number }
     ): boolean => !current || comparePlanQuality(next, current) < 0;
     const expectedHoursForPlan = (
       actions: MissionAction[],
@@ -4376,6 +4532,7 @@ export async function planForTarget(
         unmetTotal: number;
         weightedScore: number;
         geCost: number;
+        fuelCost: number;
         totalSlotSeconds: number;
         totalLaunches: number;
       }
@@ -4396,12 +4553,12 @@ export async function planForTarget(
           current.unified.missionCounts,
           current.prepNoYieldSlotSeconds
         );
-        const nextGe = Math.max(0, next.geCost);
-        const currentGe = Math.max(0, current.geCost);
-        if (nextHours + 1 / 3600 < currentHours && nextGe <= currentGe + SCORE_EPS) {
+        const nextResource = Math.max(0, objectiveResourceCost(objectiveContext, next.geCost, next.fuelCost));
+        const currentResource = Math.max(0, objectiveResourceCost(objectiveContext, current.geCost, current.fuelCost));
+        if (nextHours + 1 / 3600 < currentHours && nextResource <= currentResource + SCORE_EPS) {
           return true;
         }
-        if (nextHours <= currentHours * 0.99 && nextGe <= currentGe * 1.05 + SCORE_EPS) {
+        if (nextHours <= currentHours * 0.99 && nextResource <= currentResource * 1.05 + SCORE_EPS) {
           return true;
         }
       }
@@ -4447,6 +4604,7 @@ export async function planForTarget(
         totalSlotSeconds: number;
         unmetTotal: number;
         geCost: number;
+        fuelCost: number;
         totalLaunches: number;
       },
       next: {
@@ -4456,6 +4614,7 @@ export async function planForTarget(
         totalSlotSeconds: number;
         unmetTotal: number;
         geCost: number;
+        fuelCost: number;
         totalLaunches: number;
       }
     ): boolean => {
@@ -4469,15 +4628,36 @@ export async function planForTarget(
       const nextHours = expectedHoursForPlan(next.actions, next.unified.missionCounts, next.prepNoYieldSlotSeconds);
       if (
         nextHours <= currentHours + 1 / 3600 &&
-        next.geCost <= current.geCost + SCORE_EPS &&
-        (nextHours + 1 / 3600 < currentHours || next.geCost + SCORE_EPS < current.geCost)
+        objectiveResourceCost(objectiveContext, next.geCost, next.fuelCost) <=
+          objectiveResourceCost(objectiveContext, current.geCost, current.fuelCost) + SCORE_EPS &&
+        (
+          nextHours + 1 / 3600 < currentHours ||
+          objectiveResourceCost(objectiveContext, next.geCost, next.fuelCost) + SCORE_EPS <
+            objectiveResourceCost(objectiveContext, current.geCost, current.fuelCost)
+        )
       ) {
         return true;
       }
-      const geRefCommon = Math.max(1, current.geCost, next.geCost);
+      const resourceRefCommon = Math.max(
+        1,
+        objectiveResourceCost(objectiveContext, current.geCost, current.fuelCost),
+        objectiveResourceCost(objectiveContext, next.geCost, next.fuelCost)
+      );
       const timeRefCommon = Math.max(1, current.totalSlotSeconds / 3, next.totalSlotSeconds / 3);
-      const currentScore = normalizedScore(current.geCost, current.totalSlotSeconds / 3, priorityTime, geRefCommon, timeRefCommon);
-      const nextScore = normalizedScore(next.geCost, next.totalSlotSeconds / 3, priorityTime, geRefCommon, timeRefCommon);
+      const currentScore = normalizedObjectiveScore(
+        objectiveResourceCost(objectiveContext, current.geCost, current.fuelCost),
+        current.totalSlotSeconds / 3,
+        objectiveContext,
+        resourceRefCommon,
+        timeRefCommon
+      );
+      const nextScore = normalizedObjectiveScore(
+        objectiveResourceCost(objectiveContext, next.geCost, next.fuelCost),
+        next.totalSlotSeconds / 3,
+        objectiveContext,
+        resourceRefCommon,
+        timeRefCommon
+      );
       if (nextScore + SCORE_EPS < currentScore * 0.99 && nextHours <= currentHours * 1.05) {
         return true;
       }
@@ -4494,6 +4674,7 @@ export async function planForTarget(
       totalSlotSeconds: number;
       weightedScore: number;
       geCost: number;
+      fuelCost: number;
       unmetTotal: number;
       totalLaunches: number;
     } | null> => {
@@ -4552,9 +4733,12 @@ export async function planForTarget(
         targetKey,
         quantity: quantityInt,
         priorityTime,
+        objectiveMode,
+        minimumTimePriority: objectiveContext.minimumTimePriority,
         closure,
         actions: comboActions,
         geRef: comboRefs.geRef,
+        fuelRef: comboRefs.fuelRef,
         timeRef: comboRefs.timeRef,
         maxMissionLaunchesByOption,
         phasedChainConstraints,
@@ -4585,24 +4769,26 @@ export async function planForTarget(
       const totalSlotSeconds = prepNoYieldSlotSeconds + unified.totalSlotSeconds;
       const unmetTotal = sumRecordValues(checkedUnified.remainingDemand);
       const totalLaunches = sumRecordValues(checkedUnified.missionCounts);
+      const fuelCost = missionFuelCost(comboActions, checkedUnified.missionCounts);
       return {
         actions: comboActions,
         unified: checkedUnified,
         totalSlotSeconds,
-        weightedScore: normalizedScore(
-          checkedUnified.geCost,
+        weightedScore: normalizedObjectiveScore(
+          objectiveResourceCost(objectiveContext, checkedUnified.geCost, fuelCost),
           totalSlotSeconds / 3,
-          priorityTime,
-          geRef,
+          objectiveContext,
+          objectiveMode === "virtueFuel" ? fuelRef : geRef,
           timeRef
         ),
         geCost: checkedUnified.geCost,
+        fuelCost,
         unmetTotal,
         totalLaunches,
       };
     };
 
-    const geOnlyMode = priorityTime <= SCORE_EPS;
+    const geOnlyMode = objectiveMode === "ge" && priorityTime <= SCORE_EPS;
     const screeningLabel = geOnlyMode ? "Integer-constrained" : "Relaxed (fractional)";
     const screenedPastTense = geOnlyMode ? "Integer-screened" : "Relaxed-screened";
 
@@ -4639,6 +4825,7 @@ export async function planForTarget(
         solveMetrics: UnifiedSolveMetrics | null;
         weightedScore: number;
         geCost: number;
+        fuelCost: number;
         totalSlotSeconds: number;
         unmetTotal: number;
         totalLaunches: number;
@@ -4666,9 +4853,12 @@ export async function planForTarget(
             targetKey,
             quantity: blockQuantity,
             priorityTime,
+            objectiveMode,
+            minimumTimePriority: objectiveContext.minimumTimePriority,
             closure,
             actions: input.candidateActions,
             geRef: blockRefs.geRef,
+            fuelRef: blockRefs.fuelRef,
             timeRef: blockRefs.timeRef,
             requiredMissionLaunches: input.requiredMissionLaunches,
             maxMissionLaunchesByOption: input.maxMissionLaunchesByOption,
@@ -4684,18 +4874,20 @@ export async function planForTarget(
             },
           });
           const totalSlotSeconds = input.prepNoYieldSlotSeconds + unified.totalSlotSeconds;
+          const fuelCost = missionFuelCost(input.candidateActions, unified.missionCounts);
           blockScreened.push({
             input,
             unified,
             solveMetrics,
-            weightedScore: normalizedScore(
-              unified.geCost,
+            weightedScore: normalizedObjectiveScore(
+              objectiveResourceCost(objectiveContext, unified.geCost, fuelCost),
               totalSlotSeconds / 3,
-              priorityTime,
-              blockRefs.geRef,
+              objectiveContext,
+              objectiveMode === "virtueFuel" ? blockRefs.fuelRef : blockRefs.geRef,
               blockRefs.timeRef
             ),
             geCost: unified.geCost,
+            fuelCost,
             totalSlotSeconds,
             unmetTotal: sumRecordValues(unified.remainingDemand),
             totalLaunches: sumRecordValues(unified.missionCounts),
@@ -4721,9 +4913,12 @@ export async function planForTarget(
             targetKey,
             quantity: blockQuantity,
             priorityTime,
+            objectiveMode,
+            minimumTimePriority: objectiveContext.minimumTimePriority,
             closure,
             actions: screened.input.candidateActions,
             geRef: blockRefs.geRef,
+            fuelRef: blockRefs.fuelRef,
             timeRef: blockRefs.timeRef,
             requiredMissionLaunches: screened.input.requiredMissionLaunches,
             maxMissionLaunchesByOption: screened.input.maxMissionLaunchesByOption,
@@ -4765,19 +4960,21 @@ export async function planForTarget(
           const totalSlotSeconds = screened.input.prepNoYieldSlotSeconds + refined.unified.totalSlotSeconds;
           const unmetTotal = sumRecordValues(refined.unified.remainingDemand);
           const totalLaunches = sumRecordValues(refined.unified.missionCounts);
+          const fuelCost = missionFuelCost(refined.actions, refined.unified.missionCounts);
           const scaledCandidate = {
             actions: refined.actions,
             missionCounts: refined.unified.missionCounts,
             prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
             unmetTotal,
-            weightedScore: normalizedScore(
-              refined.unified.geCost,
+            weightedScore: normalizedObjectiveScore(
+              objectiveResourceCost(objectiveContext, refined.unified.geCost, fuelCost),
               totalSlotSeconds / 3,
-              priorityTime,
-              geRef,
+              objectiveContext,
+              objectiveMode === "virtueFuel" ? fuelRef : geRef,
               timeRef
             ),
             geCost: refined.unified.geCost,
+            fuelCost,
             totalSlotSeconds,
             totalLaunches,
           };
@@ -4790,6 +4987,7 @@ export async function planForTarget(
               totalSlotSeconds,
               weightedScore: scaledCandidate.weightedScore,
               geCost: refined.unified.geCost,
+              fuelCost,
               unmetTotal,
               totalLaunches,
               prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
@@ -4826,6 +5024,7 @@ export async function planForTarget(
       solveMetrics: UnifiedSolveMetrics | null;
       weightedScore: number;
       geCost: number;
+      fuelCost: number;
       totalSlotSeconds: number;
       unmetTotal: number;
       totalLaunches: number;
@@ -4854,11 +5053,11 @@ export async function planForTarget(
       });
       await yieldForProgressFlush();
 
-      const prepOnlyLowerBound = normalizedScore(
+      const prepOnlyLowerBound = normalizedObjectiveScore(
         0,
         candidate.prepSlotSeconds / 3,
-        priorityTime,
-        geRef,
+        objectiveContext,
+        objectiveMode === "virtueFuel" ? fuelRef : geRef,
         timeRef
       );
       const currentBestLp = lpScreened.reduce<LpScreenResult | null>((bestLp, row) => {
@@ -4892,6 +5091,7 @@ export async function planForTarget(
           solveMetrics: result.solveMetrics,
           weightedScore: result.weightedScore,
           geCost: result.geCost,
+          fuelCost: result.fuelCost,
           totalSlotSeconds: result.totalSlotSeconds,
           unmetTotal: result.unmetTotal,
           totalLaunches: result.totalLaunches,
@@ -4935,6 +5135,7 @@ export async function planForTarget(
             totalSlotSeconds: screened.totalSlotSeconds,
             weightedScore: screened.weightedScore,
             geCost: screened.geCost,
+            fuelCost: screened.fuelCost,
             unmetTotal: screened.unmetTotal,
             totalLaunches: screened.totalLaunches,
             prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
@@ -4975,6 +5176,7 @@ export async function planForTarget(
                 totalSlotSeconds: result.totalSlotSeconds,
                 weightedScore: result.weightedScore,
                 geCost: result.geCost,
+                fuelCost: result.fuelCost,
                 unmetTotal: result.unmetTotal,
                 totalLaunches: result.totalLaunches,
                 prepNoYieldSlotSeconds: input.prepNoYieldSlotSeconds,
@@ -5007,6 +5209,7 @@ export async function planForTarget(
             totalSlotSeconds: bestLp.totalSlotSeconds,
             weightedScore: bestLp.weightedScore,
             geCost: bestLp.geCost,
+            fuelCost: bestLp.fuelCost,
             unmetTotal: bestLp.unmetTotal,
             totalLaunches: bestLp.totalLaunches,
             prepNoYieldSlotSeconds: bestLp.input.prepNoYieldSlotSeconds,
@@ -5058,6 +5261,7 @@ export async function planForTarget(
               totalSlotSeconds: result.totalSlotSeconds,
               weightedScore: result.weightedScore,
               geCost: result.geCost,
+              fuelCost: result.fuelCost,
               unmetTotal: result.unmetTotal,
               totalLaunches: result.totalLaunches,
               prepNoYieldSlotSeconds: input.prepNoYieldSlotSeconds,
@@ -5089,7 +5293,7 @@ export async function planForTarget(
       await tryScaledQuantityIncumbent();
     }
 
-    if (!geOnlyMode && !fastMode && best.unmetTotal <= 1e-6 && best.geCost > SCORE_EPS) {
+    if (objectiveMode === "ge" && !geOnlyMode && !fastMode && best.unmetTotal <= 1e-6 && best.geCost > SCORE_EPS) {
       const polishInput = await prepareCandidateInput(best.candidate);
       if (polishInput) {
         const baselineExpectedHours = estimateThreeSlotExpectedHours({
@@ -5115,9 +5319,12 @@ export async function planForTarget(
               targetKey,
               quantity: solveQuantity,
               priorityTime: 0,
+              objectiveMode,
+              minimumTimePriority: objectiveContext.minimumTimePriority,
               closure,
               actions: polishInput.candidateActions,
               geRef,
+              fuelRef,
               timeRef,
               requiredMissionLaunches: polishInput.requiredMissionLaunches,
               maxMissionLaunchesByOption: polishInput.maxMissionLaunchesByOption,
@@ -5156,20 +5363,22 @@ export async function planForTarget(
                 0
               );
               const previousGeCost = best.geCost;
+              const polishedFuelCost = missionFuelCost(polishInput.candidateActions, polishedUnified.missionCounts);
               best = {
                 candidate: polishInput.candidate,
                 actions: polishInput.candidateActions,
                 unified: polishedUnified,
                 solveMetrics: polishedSolveMetrics,
                 totalSlotSeconds: polishedTotalSlotSeconds,
-                weightedScore: normalizedScore(
-                  polishedUnified.geCost,
+                weightedScore: normalizedObjectiveScore(
+                  objectiveResourceCost(objectiveContext, polishedUnified.geCost, polishedFuelCost),
                   polishedTotalSlotSeconds / 3,
-                  priorityTime,
+                  objectiveContext,
                   geRef,
                   timeRef
                 ),
                 geCost: polishedUnified.geCost,
+                fuelCost: polishedFuelCost,
                 unmetTotal: polishedUnmetTotal,
                 totalLaunches: polishedTotalLaunches,
                 prepNoYieldSlotSeconds: polishInput.prepNoYieldSlotSeconds,
@@ -5281,11 +5490,14 @@ export async function planForTarget(
           `Fast mode progression-aware scaling pruned ${refined.prunedLaunches.toLocaleString()} repeated launches after projected ship level gains improved expected drops.`
         );
       }
-      outputWeightedScore = normalizedScore(
-        outputUnified.geCost,
+      const outputFuelCost = missionFuelCost(outputActions, outputUnified.missionCounts);
+      outputWeightedScore = normalizedObjectiveScore(
+        objectiveResourceCost(objectiveContext, outputUnified.geCost, outputFuelCost),
         outputTotalSlotSeconds / 3,
-        priorityTime,
-        Math.max(1, computeGeCostForCrafts(profile, outputUnified.crafts), geRef),
+        objectiveContext,
+        objectiveMode === "virtueFuel"
+          ? Math.max(1, outputFuelCost, fuelRef * scaled.repeatFactor)
+          : Math.max(1, computeGeCostForCrafts(profile, outputUnified.crafts), geRef),
         Math.max(1, timeRef * scaled.repeatFactor)
       );
       if (multiTargetFastQuantityAcceleration) {
@@ -5304,6 +5516,8 @@ export async function planForTarget(
         const unscaledFastResult = await planForTarget(profile, targetItemId, quantityInt, priorityTime, {
           ...plannerOptions,
           fastMode: true,
+          objectiveMode,
+          minimumTimePriority: objectiveContext.minimumTimePriority,
           disableFastQuantityAcceleration: true,
           disableNormalFastIncumbent: true,
         });
@@ -5345,6 +5559,7 @@ export async function planForTarget(
               totalSlotSeconds: outputTotalSlotSeconds,
               unmetTotal: outputUnmetTotal,
               geCost: outputUnified.geCost,
+              fuelCost: missionFuelCost(outputActions, outputUnified.missionCounts),
               totalLaunches: sumRecordValues(outputUnified.missionCounts),
             };
             const monolithicCandidate = {
@@ -5354,6 +5569,7 @@ export async function planForTarget(
               totalSlotSeconds: monolithic.totalSlotSeconds,
               unmetTotal: monolithic.unmetTotal,
               geCost: monolithic.geCost,
+              fuelCost: monolithic.fuelCost,
               totalLaunches: monolithic.totalLaunches,
             };
             if (shouldReplaceWithMonolithicIncumbent(currentCandidate, monolithicCandidate)) {
@@ -5371,7 +5587,7 @@ export async function planForTarget(
         }
         if (adoptedMonolithicCombo) {
           refinementNotes.push(
-            `Monolithic incumbent replaced the mixed plan using ${adoptedMonolithicCombo.ship} ${adoptedMonolithicCombo.durationType} target ${adoptedMonolithicCombo.targetAfxId} because it compared better on the selected GE/time priority.`
+            `Monolithic incumbent replaced the mixed plan using ${adoptedMonolithicCombo.ship} ${adoptedMonolithicCombo.durationType} target ${adoptedMonolithicCombo.targetAfxId} because it compared better on the selected ${objectiveMode === "virtueFuel" ? "fuel/time" : "GE/time"} priority.`
           );
         } else if (testedMonolithicCount > 0) {
           refinementNotes.push(
@@ -5435,6 +5651,13 @@ export async function planForTarget(
     }
     if (geOnlyMode) {
       notes.push("GE-priority uses lexicographic integer solves per candidate: lowest GE first, then lowest mission time within that GE cost.");
+    }
+    if (objectiveMode === "virtueFuel") {
+      notes.push(
+        `Path of Virtue objective optimizes non-Humility fuel versus mission time; the fuel end keeps at least ${Math.round(
+          objectiveContext.minimumTimePriority * 100
+        )}% time weight to avoid extreme slowdowns.`
+      );
     }
     if (progressionDeduped.dedupedCount > 0) {
       notes.push(
@@ -5543,6 +5766,7 @@ export async function planForTarget(
       missionCounts: outputUnified.missionCounts,
       residualSlotSeconds: best.prepNoYieldSlotSeconds,
     });
+    const outputFuelCost = missionFuelCost(outputActions, outputUnified.missionCounts);
 
     // Build available combos from the selected candidate's actions
     const comboSet = new Set<string>();
@@ -5564,7 +5788,9 @@ export async function planForTarget(
       quantity: quantityInt,
       targets: normalizedTargets.targets,
       priorityTime,
+      objectiveMode,
       geCost: outputUnified.geCost,
+      fuelCost: outputFuelCost,
       totalSlotSeconds: outputTotalSlotSeconds,
       expectedHours,
       weightedScore: outputWeightedScore,
@@ -5601,6 +5827,8 @@ export async function planForTarget(
     const fallback = await planForTargetHeuristic(fallbackProfile, targetItemId, quantityInt, priorityTime, {
       missionDropRarities,
       targetCraftedOnly,
+      objectiveMode,
+      minimumTimePriority: objectiveContext.minimumTimePriority,
       solverFn,
       lootData: injectedLootData,
     });

@@ -196,6 +196,7 @@ export const replanRequestSchema = z.object({
     .finite()
     .default(0.5)
     .transform((value) => Math.max(0, Math.min(1, value))),
+  inventorySource: z.string().optional(),
   fastMode: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropRare: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropEpic: z.union([z.boolean(), z.number(), z.string()]).optional(),
@@ -209,6 +210,7 @@ export const replanRequestSchema = z.object({
   missionLaunches: z.array(missionLaunchUpdateSchema).optional().default([]),
 }).transform((value) => ({
   ...value,
+  inventorySource: parseInventorySource(value.inventorySource),
   fastMode: parseFastMode(value.fastMode),
   includeDropRare: parseEnabledByDefault(value.includeDropRare, true),
   includeDropEpic: parseEnabledByDefault(value.includeDropEpic, true),
@@ -285,7 +287,9 @@ export const plannerResultSchema = z.object({
   quantity: nonNegativeIntSchema,
   targets: z.array(plannerTargetSchema),
   priorityTime: z.number().finite().min(0).max(1),
+  objectiveMode: z.enum(["ge", "virtueFuel"]).default("ge"),
   geCost: nonNegativeFiniteSchema,
+  fuelCost: nonNegativeFiniteSchema.default(0),
   totalSlotSeconds: nonNegativeIntSchema,
   expectedHours: nonNegativeFiniteSchema,
   weightedScore: nonNegativeFiniteSchema,

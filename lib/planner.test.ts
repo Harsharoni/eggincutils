@@ -1599,4 +1599,97 @@ describe("planForTarget coverage handling", () => {
     expect(result.missions[0].launches).toBe(3);
     expect(result.targetBreakdown.requested).toBe(3);
   });
+
+  it("uses Path of Virtue fuel objective with a nonzero time floor", async () => {
+    const models: string[] = [];
+    mockedLoadLootData.mockResolvedValue({
+      missions: [
+        {
+          afxShip: 0,
+          afxDurationType: 0,
+          missionId: "bcr-short",
+          levels: [
+            {
+              level: 0,
+              targets: [
+                {
+                  totalDrops: 5000,
+                  targetAfxId: 10000,
+                  items: [{ afxId: 0, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          afxShip: 0,
+          afxDurationType: 0,
+          missionId: "henliner-short",
+          levels: [
+            {
+              level: 0,
+              targets: [
+                {
+                  totalDrops: 5000,
+                  targetAfxId: 10000,
+                  items: [{ afxId: 0, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    mockedSolveWithHighs.mockImplementation(async (model: string): Promise<HighsSolveResult> => {
+      models.push(model);
+      return {
+        Status: "Optimal",
+        Columns: { m_0: { Primal: 1 } },
+      };
+    });
+
+    const profile = baseProfile();
+    profile.missionOptions = [
+      {
+        ship: "BCR",
+        missionId: "bcr-short",
+        durationType: "SHORT",
+        level: 0,
+        durationSeconds: 300_000,
+        capacity: 1,
+      },
+      {
+        ship: "ATREGGIES",
+        missionId: "henliner-short",
+        durationType: "SHORT",
+        level: 0,
+        durationSeconds: 300,
+        capacity: 1,
+      },
+    ];
+
+    const result = await planForTarget(profile, "puzzle-cube-1", 1, 0, {
+      objectiveMode: "virtueFuel",
+      disableFastQuantityAcceleration: true,
+    });
+
+    const objectiveModel = models.find((model) => model.includes(" m_0") && model.includes(" m_1"));
+    expect(objectiveModel).toBeTruthy();
+    const objectiveLine = objectiveModel!
+      .split("\n")
+      .find((line) => line.trim().startsWith("obj:"));
+    expect(objectiveLine).toBeTruthy();
+
+    const coeffFor = (variable: string): number => {
+      const match = objectiveLine!.match(new RegExp(`([0-9.]+)\\s+${variable}\\b`));
+      return match ? Number(match[1]) : Number.NaN;
+    };
+    const bcrCoeff = coeffFor("m_0");
+    const henlinerCoeff = coeffFor("m_1");
+
+    expect(result.objectiveMode).toBe("virtueFuel");
+    expect(result.fuelCost).toBe(10_000_000);
+    expect(bcrCoeff).toBeGreaterThan(100);
+    expect(henlinerCoeff).toBeGreaterThan(bcrCoeff * 1000);
+  });
 });

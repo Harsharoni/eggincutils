@@ -28,6 +28,12 @@ import useHighsWorker from "../../lib/use-highs-worker";
 import { planForTarget, computeMonolithicPaths, type PlannerProgressEvent } from "../../lib/planner";
 import { createDemoProfile, isBlankEid } from "../../lib/demo-profile";
 import type { LootJson } from "../../lib/loot-data";
+import {
+  formatVirtueFuelQuantity,
+  getVirtueFuelConfig,
+  VIRTUE_FUEL_DISPLAY,
+  type VirtueFuelKey,
+} from "../../lib/virtue-fuel";
 import styles from "./page.module.css";
 
 type ShipLevelInfo = {
@@ -94,7 +100,9 @@ type PlanResponse = {
     quantity: number;
     targets: Array<{ targetItemId: string; quantity: number }>;
     priorityTime: number;
+    objectiveMode: "ge" | "virtueFuel";
     geCost: number;
+    fuelCost: number;
     totalSlotSeconds: number;
     expectedHours: number;
     weightedScore: number;
@@ -291,6 +299,28 @@ type MissionTimeline = {
   hiddenPrepSlotSeconds: number;
 };
 
+type FuelChartSegment = {
+  id: string;
+  label: string;
+  subtitle: string;
+  quantity: number;
+  color: string;
+};
+
+type FuelChartRow = {
+  fuel: VirtueFuelKey;
+  label: string;
+  imageSrc: string;
+  total: number;
+  segments: FuelChartSegment[];
+};
+
+type FuelCharts = {
+  rows: FuelChartRow[];
+  maxTotal: number;
+  total: number;
+};
+
 const DURATION_TYPES: DurationType[] = ["TUTORIAL", "SHORT", "LONG", "EPIC"];
 const SHIP_SELECTOR_DURATIONS: Array<{ key: "SHORT" | "LONG" | "EPIC"; label: string }> = [
   { key: "SHORT", label: "Short" },
@@ -323,6 +353,24 @@ function buildDefaultShipDurations(): ShipDurationSelection {
 function shipImageUrl(filename: string, host: string = SHIP_IMAGE_HOST): string {
   return `${host}/128/egginc/${filename}`;
 }
+
+type PlannerSourcePreferences = {
+  targetRows?: Array<{ targetItemId?: string; itemId?: string; quantity?: number; quantityInput?: string }>;
+  targetCraftedOnly?: boolean;
+  includeSlotted?: boolean;
+  includeInventoryRare?: boolean;
+  includeInventoryEpic?: boolean;
+  includeInventoryLegendary?: boolean;
+  includeInventoryFragments?: boolean;
+  includeDropRare?: boolean;
+  includeDropEpic?: boolean;
+  includeDropLegendary?: boolean;
+  includeDropFragments?: boolean;
+  shipDurations?: ShipDurationSelection;
+};
+
+type PlannerSourcePreferenceStore = Partial<Record<InventorySource, PlannerSourcePreferences>>;
+
 const ARTIFACT_DISPLAY = artifactDisplay as Record<string, { id: string; name: string; tierName: string; tierNumber: number }>;
 const SHARED_EID_KEYS = [LOCAL_PREF_KEYS.sharedEid, LOCAL_PREF_KEYS.legacyEid] as const;
 const SHARED_INCLUDE_SLOTTED_KEYS = [LOCAL_PREF_KEYS.sharedIncludeSlotted, LOCAL_PREF_KEYS.legacyIncludeSlotted] as const;
@@ -413,6 +461,27 @@ function missionTimelineColor(seed: string, usedPaletteIndexes: Set<number>): st
   }
   const [hue, saturation, lightness] = MISSION_COLOR_PALETTE[hash % paletteLen];
   return `hsl(${hue} ${saturation}% ${lightness}% / 0.66)`;
+}
+
+function missionColorKey(mission: Pick<PlanMissionRow, "ship" | "durationType" | "targetAfxId">): string {
+  return `${mission.ship}|${mission.durationType}|${mission.targetAfxId}`;
+}
+
+function buildMissionColorMap(missions: PlanMissionRow[]): Map<string, string> {
+  const usedPaletteIndexes = new Set<number>();
+  const colorByKey = new Map<string, string>();
+  for (const mission of missions) {
+    const launches = Math.max(0, Math.round(mission.launches));
+    const durationSeconds = Math.max(0, Math.round(mission.durationSeconds));
+    if (launches <= 0 || launches * durationSeconds <= 0) {
+      continue;
+    }
+    const key = missionColorKey(mission);
+    if (!colorByKey.has(key)) {
+      colorByKey.set(key, missionTimelineColor(key, usedPaletteIndexes));
+    }
+  }
+  return colorByKey;
 }
 
 function laneOrderByLoad(loads: number[]): number[] {
@@ -602,7 +671,7 @@ function sortTimelineSegmentsForLegend(segments: TimelineSegment[]): TimelineSeg
 }
 
 function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | null {
-  const usedMissionPaletteIndexes = new Set<number>();
+  const missionColorByKey = buildMissionColorMap(plan.missions);
   const rawMissionSegments: TimelineSegment[] = plan.missions
     .map((mission: PlanMissionRow, index): TimelineSegment | null => {
       const launches = Math.max(0, Math.round(mission.launches));
@@ -620,10 +689,7 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
         launches,
         durationSeconds,
         totalSlotSeconds,
-        color: missionTimelineColor(
-          `${mission.ship}|${mission.durationType}|${mission.targetAfxId}`,
-          usedMissionPaletteIndexes
-        ),
+        color: missionColorByKey.get(missionColorKey(mission)) || prepTimelineColor(missionColorKey(mission)),
         phase: "mission",
         ship: mission.ship,
         durationType: mission.durationType,
@@ -834,6 +900,69 @@ function buildMissionTimeline(plan: PlanResponse["plan"]): MissionTimeline | nul
   };
 }
 
+function buildVirtueFuelCharts(plan: PlanResponse["plan"]): FuelCharts | null {
+  const missionColorByKey = buildMissionColorMap(plan.missions);
+  const segmentsByFuel = new Map<VirtueFuelKey, FuelChartSegment[]>();
+  const totalsByFuel = new Map<VirtueFuelKey, number>();
+
+  plan.missions.forEach((mission, missionIndex) => {
+    const launches = Math.max(0, Math.round(mission.launches));
+    if (launches <= 0) {
+      return;
+    }
+    const fuelConfig = getVirtueFuelConfig(mission.ship, mission.durationType);
+    if (Object.keys(fuelConfig).length === 0) {
+      return;
+    }
+    const key = missionColorKey(mission);
+    const label = `${titleCaseShip(mission.ship)} ${durationTypeWithLevelLabel(mission.durationType, mission.level)}`;
+    const subtitle = afxIdToTargetFamilyName(mission.targetAfxId);
+    const color = missionColorByKey.get(key) || prepTimelineColor(key);
+
+    for (const fuel of VIRTUE_FUEL_DISPLAY) {
+      const perLaunch = fuelConfig[fuel.key] || 0;
+      const quantity = perLaunch * launches;
+      if (quantity <= 0) {
+        continue;
+      }
+      const segment: FuelChartSegment = {
+        id: `${fuel.key}:${missionIndex}:${mission.missionId}:${mission.targetAfxId}`,
+        label,
+        subtitle,
+        quantity,
+        color,
+      };
+      segmentsByFuel.set(fuel.key, [...(segmentsByFuel.get(fuel.key) || []), segment]);
+      totalsByFuel.set(fuel.key, (totalsByFuel.get(fuel.key) || 0) + quantity);
+    }
+  });
+
+  const rows = VIRTUE_FUEL_DISPLAY.map((fuel): FuelChartRow | null => {
+    const segments = segmentsByFuel.get(fuel.key) || [];
+    const total = totalsByFuel.get(fuel.key) || 0;
+    if (segments.length === 0 || total <= 0) {
+      return null;
+    }
+    return {
+      fuel: fuel.key,
+      label: fuel.label,
+      imageSrc: fuel.imageSrc,
+      total,
+      segments: segments.sort((a, b) => {
+        const labelDiff = a.label.localeCompare(b.label);
+        if (labelDiff !== 0) {
+          return labelDiff;
+        }
+        return a.subtitle.localeCompare(b.subtitle);
+      }),
+    };
+  }).filter((row): row is FuelChartRow => row !== null);
+
+  const maxTotal = Math.max(0, ...rows.map((row) => row.total));
+  const total = rows.reduce((sum, row) => sum + row.total, 0);
+  return rows.length > 0 && maxTotal > 0 ? { rows, maxTotal, total } : null;
+}
+
 function formatDurationFromHours(hours: number): string {
   const totalMinutes = Math.max(0, Math.round(hours * 60));
   const days = Math.floor(totalMinutes / (24 * 60));
@@ -1033,6 +1162,51 @@ function serializeTargetRows(rows: PlannerTargetRow[]): string {
   );
 }
 
+function normalizeShipDurations(value: unknown): ShipDurationSelection | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const parsed = value as ShipDurationSelection;
+  const merged = buildDefaultShipDurations();
+  for (const entry of SHIP_DISPLAY_CONFIG) {
+    const saved = parsed[entry.ship];
+    if (saved && typeof saved === "object") {
+      merged[entry.ship] = {
+        SHORT: typeof saved.SHORT === "boolean" ? saved.SHORT : true,
+        LONG: typeof saved.LONG === "boolean" ? saved.LONG : true,
+        EPIC: typeof saved.EPIC === "boolean" ? saved.EPIC : true,
+      };
+    }
+  }
+  return merged;
+}
+
+function readPlannerSourcePreferenceStore(): PlannerSourcePreferenceStore {
+  const raw = readFirstStoredString([LOCAL_PREF_KEYS.plannerSourcePreferences]);
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    const record = parsed as Record<string, PlannerSourcePreferences>;
+    return {
+      main: record.main && typeof record.main === "object" ? record.main : undefined,
+      virtue: record.virtue && typeof record.virtue === "object" ? record.virtue : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writePlannerSourcePreferences(source: InventorySource, preferences: PlannerSourcePreferences): void {
+  const store = readPlannerSourcePreferenceStore();
+  store[source] = preferences;
+  writeStoredString([LOCAL_PREF_KEYS.plannerSourcePreferences], JSON.stringify(store));
+}
+
 function profileUrl(eid: string, filters: PlannerSourceFilters): string {
   const params = new URLSearchParams({
     eid,
@@ -1172,6 +1346,7 @@ export default function MissionCraftPlannerPage() {
   const [quantityInput, setQuantityInput] = useState("1");
   const [targetCraftedOnly, setTargetCraftedOnly] = useState(false);
   const [priorityTimePct, setPriorityTimePct] = useState(50);
+  const [virtuePriorityTimePct, setVirtuePriorityTimePct] = useState(50);
   const [inventorySource, setInventorySource] = useState<InventorySource>("main");
   const [includeSlotted, setIncludeSlotted] = useState(false);
   const [includeInventoryRare, setIncludeInventoryRare] = useState(false);
@@ -1206,6 +1381,7 @@ export default function MissionCraftPlannerPage() {
   const lootDataRef = useRef<LootJson | null>(null);
   const targetPickerRef = useRef<HTMLDivElement | null>(null);
   const targetFilterInputRef = useRef<HTMLInputElement | null>(null);
+  const skipNextScopedPreferenceSaveRef = useRef(false);
   const highs = useHighsWorker();
   const highsRef = useRef(highs);
   highsRef.current = highs;
@@ -1223,6 +1399,66 @@ export default function MissionCraftPlannerPage() {
     includeDropEpic,
     includeDropLegendary,
     includeDropFragments,
+  };
+  const activePriorityTimePct = inventorySource === "virtue" ? virtuePriorityTimePct : priorityTimePct;
+  const setActivePriorityTimePct = inventorySource === "virtue" ? setVirtuePriorityTimePct : setPriorityTimePct;
+
+  const buildCurrentSourcePreferences = (): PlannerSourcePreferences => ({
+    targetRows: targetRows.map((row) => ({
+      targetItemId: row.itemId,
+      quantity: normalizedTargetQuantity(row.quantityInput),
+    })),
+    targetCraftedOnly,
+    includeSlotted,
+    includeInventoryRare,
+    includeInventoryEpic,
+    includeInventoryLegendary,
+    includeInventoryFragments,
+    includeDropRare,
+    includeDropEpic,
+    includeDropLegendary,
+    includeDropFragments,
+    shipDurations,
+  });
+
+  const applySourcePreferences = (preferences: PlannerSourcePreferences | null | undefined) => {
+    const rows = preferences?.targetRows
+      ? parseStoredTargetRows(JSON.stringify(preferences.targetRows), targetOptions)
+      : null;
+    const nextRows = rows || [{ id: "target-1", itemId: "soul-stone-2", quantityInput: "1" }];
+    const primaryTarget = nextRows[0];
+    setTargetRows(nextRows);
+    setActiveTargetRowId(primaryTarget.id);
+    setTargetItemId(primaryTarget.itemId);
+    const primaryQuantity = normalizedTargetQuantity(primaryTarget.quantityInput);
+    setQuantity(primaryQuantity);
+    setQuantityInput(String(primaryQuantity));
+    setTargetCraftedOnly(Boolean(preferences?.targetCraftedOnly));
+    setIncludeSlotted(Boolean(preferences?.includeSlotted));
+    setIncludeInventoryRare(Boolean(preferences?.includeInventoryRare));
+    setIncludeInventoryEpic(Boolean(preferences?.includeInventoryEpic));
+    setIncludeInventoryLegendary(Boolean(preferences?.includeInventoryLegendary));
+    setIncludeInventoryFragments(preferences?.includeInventoryFragments !== false);
+    setIncludeDropRare(Boolean(preferences?.includeDropRare));
+    setIncludeDropEpic(Boolean(preferences?.includeDropEpic));
+    setIncludeDropLegendary(Boolean(preferences?.includeDropLegendary));
+    setIncludeDropFragments(preferences?.includeDropFragments !== false);
+    setShipDurations(normalizeShipDurations(preferences?.shipDurations) || buildDefaultShipDurations());
+  };
+
+  const handleInventorySourceChange = (nextSource: InventorySource) => {
+    if (nextSource === inventorySource) {
+      return;
+    }
+    try {
+      writePlannerSourcePreferences(inventorySource, buildCurrentSourcePreferences());
+      writeStoredString([LOCAL_PREF_KEYS.plannerInventorySource], nextSource);
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+    skipNextScopedPreferenceSaveRef.current = true;
+    setInventorySource(nextSource);
+    applySourcePreferences(readPlannerSourcePreferenceStore()[nextSource] || null);
   };
 
   const shipSelectorSummary = useMemo(() => {
@@ -1332,6 +1568,10 @@ export default function MissionCraftPlannerPage() {
   }, [targetFilter, targetOptions, targetPickerOpen]);
 
   const missionTimeline = useMemo(() => (response ? buildMissionTimeline(response.plan) : null), [response]);
+  const virtueFuelCharts = useMemo(
+    () => (response && inventorySource === "virtue" ? buildVirtueFuelCharts(response.plan) : null),
+    [inventorySource, response]
+  );
   const expectedMissionHours = response?.plan.expectedHours ?? (missionTimeline ? missionTimeline.totalSeconds / 3600 : 0);
   const craftPlanDetailRows = useMemo(() => {
     if (!response) {
@@ -1624,108 +1864,114 @@ export default function MissionCraftPlannerPage() {
         setIncludeSlotted(savedIncludeSlotted);
       }
       const savedInventorySource = readFirstStoredString([LOCAL_PREF_KEYS.plannerInventorySource]);
-      if (savedInventorySource === "main" || savedInventorySource === "virtue") {
-        setInventorySource(savedInventorySource);
+      const initialInventorySource: InventorySource =
+        savedInventorySource === "main" || savedInventorySource === "virtue" ? savedInventorySource : "main";
+      setInventorySource(initialInventorySource);
+      const scopedSourcePreferences = readPlannerSourcePreferenceStore()[initialInventorySource];
+      const loadedScopedSourcePreferences = Boolean(scopedSourcePreferences);
+      if (scopedSourcePreferences) {
+        applySourcePreferences(scopedSourcePreferences);
       }
-      const savedTargetRows = parseStoredTargetRows(
-        readFirstStoredString([LOCAL_PREF_KEYS.plannerTargets]),
-        targetOptions
-      );
-      if (savedTargetRows) {
-        const primaryTarget = savedTargetRows[0];
-        setTargetRows(savedTargetRows);
-        setActiveTargetRowId(primaryTarget.id);
-        setTargetItemId(primaryTarget.itemId);
-        const primaryQuantity = normalizedTargetQuantity(primaryTarget.quantityInput);
-        setQuantity(primaryQuantity);
-        setQuantityInput(String(primaryQuantity));
-      } else {
-        const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
-        if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
-          setTargetItemId(savedTarget);
-          setTargetRows((rows) => {
-            const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: savedTarget, quantityInput: "1" }];
-            next[0] = { ...next[0], itemId: savedTarget };
-            return next;
-          });
+      if (!loadedScopedSourcePreferences) {
+        const savedTargetRows = parseStoredTargetRows(
+          readFirstStoredString([LOCAL_PREF_KEYS.plannerTargets]),
+          targetOptions
+        );
+        if (savedTargetRows) {
+          const primaryTarget = savedTargetRows[0];
+          setTargetRows(savedTargetRows);
+          setActiveTargetRowId(primaryTarget.id);
+          setTargetItemId(primaryTarget.itemId);
+          const primaryQuantity = normalizedTargetQuantity(primaryTarget.quantityInput);
+          setQuantity(primaryQuantity);
+          setQuantityInput(String(primaryQuantity));
+        } else {
+          const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
+          if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
+            setTargetItemId(savedTarget);
+            setTargetRows((rows) => {
+              const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: savedTarget, quantityInput: "1" }];
+              next[0] = { ...next[0], itemId: savedTarget };
+              return next;
+            });
+          }
+          const savedQuantity = readStoredInteger([LOCAL_PREF_KEYS.plannerQuantity], 1, 9999);
+          if (savedQuantity != null) {
+            setQuantity(savedQuantity);
+            setQuantityInput(String(savedQuantity));
+            setTargetRows((rows) => {
+              const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: targetItemId, quantityInput: String(savedQuantity) }];
+              next[0] = { ...next[0], quantityInput: String(savedQuantity) };
+              return next;
+            });
+          }
         }
-        const savedQuantity = readStoredInteger([LOCAL_PREF_KEYS.plannerQuantity], 1, 9999);
-        if (savedQuantity != null) {
-          setQuantity(savedQuantity);
-          setQuantityInput(String(savedQuantity));
-          setTargetRows((rows) => {
-            const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: targetItemId, quantityInput: String(savedQuantity) }];
-            next[0] = { ...next[0], quantityInput: String(savedQuantity) };
-            return next;
-          });
+        const savedTargetCraftedOnly = readStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly]);
+        if (savedTargetCraftedOnly != null) {
+          setTargetCraftedOnly(savedTargetCraftedOnly);
         }
-      }
-      const savedTargetCraftedOnly = readStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly]);
-      if (savedTargetCraftedOnly != null) {
-        setTargetCraftedOnly(savedTargetCraftedOnly);
       }
       const savedPriority = readStoredInteger([LOCAL_PREF_KEYS.plannerPriorityTimePct], 0, 100);
       if (savedPriority != null) {
         setPriorityTimePct(savedPriority);
       }
+      const savedVirtuePriority = readStoredInteger([LOCAL_PREF_KEYS.plannerVirtuePriorityTimePct], 0, 100);
+      if (savedVirtuePriority != null) {
+        setVirtuePriorityTimePct(savedVirtuePriority);
+      }
       const savedFastMode = readStoredBoolean([LOCAL_PREF_KEYS.plannerFastMode]);
       if (savedFastMode != null) {
         setFastMode(savedFastMode);
       }
-      const savedIncludeInventoryRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryRare]);
-      if (savedIncludeInventoryRare != null) {
-        setIncludeInventoryRare(savedIncludeInventoryRare);
-      }
-      const savedIncludeInventoryEpic = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryEpic]);
-      if (savedIncludeInventoryEpic != null) {
-        setIncludeInventoryEpic(savedIncludeInventoryEpic);
-      }
-      const savedIncludeInventoryLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryLegendary]);
-      if (savedIncludeInventoryLegendary != null) {
-        setIncludeInventoryLegendary(savedIncludeInventoryLegendary);
-      }
-      const savedIncludeInventoryFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments]);
-      if (savedIncludeInventoryFragments != null) {
-        setIncludeInventoryFragments(savedIncludeInventoryFragments);
-      }
-      const savedIncludeDropRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare]);
-      if (savedIncludeDropRare != null) {
-        setIncludeDropRare(savedIncludeDropRare);
-      }
-      const savedIncludeDropEpic = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropEpic]);
-      if (savedIncludeDropEpic != null) {
-        setIncludeDropEpic(savedIncludeDropEpic);
-      }
-      const savedIncludeDropLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary]);
-      if (savedIncludeDropLegendary != null) {
-        setIncludeDropLegendary(savedIncludeDropLegendary);
-      }
-      const savedIncludeDropFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments]);
-      if (savedIncludeDropFragments != null) {
-        setIncludeDropFragments(savedIncludeDropFragments);
+      if (!loadedScopedSourcePreferences) {
+        const savedIncludeInventoryRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryRare]);
+        if (savedIncludeInventoryRare != null) {
+          setIncludeInventoryRare(savedIncludeInventoryRare);
+        }
+        const savedIncludeInventoryEpic = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryEpic]);
+        if (savedIncludeInventoryEpic != null) {
+          setIncludeInventoryEpic(savedIncludeInventoryEpic);
+        }
+        const savedIncludeInventoryLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryLegendary]);
+        if (savedIncludeInventoryLegendary != null) {
+          setIncludeInventoryLegendary(savedIncludeInventoryLegendary);
+        }
+        const savedIncludeInventoryFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryFragments]);
+        if (savedIncludeInventoryFragments != null) {
+          setIncludeInventoryFragments(savedIncludeInventoryFragments);
+        }
+        const savedIncludeDropRare = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropRare]);
+        if (savedIncludeDropRare != null) {
+          setIncludeDropRare(savedIncludeDropRare);
+        }
+        const savedIncludeDropEpic = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropEpic]);
+        if (savedIncludeDropEpic != null) {
+          setIncludeDropEpic(savedIncludeDropEpic);
+        }
+        const savedIncludeDropLegendary = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropLegendary]);
+        if (savedIncludeDropLegendary != null) {
+          setIncludeDropLegendary(savedIncludeDropLegendary);
+        }
+        const savedIncludeDropFragments = readStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeDropFragments]);
+        if (savedIncludeDropFragments != null) {
+          setIncludeDropFragments(savedIncludeDropFragments);
+        }
       }
       const savedDemoNoticeDismissed = readStoredBoolean([LOCAL_PREF_KEYS.plannerDemoNoticeDismissed]);
       if (savedDemoNoticeDismissed != null) {
         setDemoNoticeDismissed(savedDemoNoticeDismissed);
       }
-      const savedShipDurations = readFirstStoredString([LOCAL_PREF_KEYS.plannerShipDurations]);
-      if (savedShipDurations) {
-        try {
-          const parsed = JSON.parse(savedShipDurations) as ShipDurationSelection;
-          const merged = buildDefaultShipDurations();
-          for (const entry of SHIP_DISPLAY_CONFIG) {
-            const saved = parsed[entry.ship];
-            if (saved && typeof saved === "object") {
-              merged[entry.ship] = {
-                SHORT: typeof saved.SHORT === "boolean" ? saved.SHORT : true,
-                LONG: typeof saved.LONG === "boolean" ? saved.LONG : true,
-                EPIC: typeof saved.EPIC === "boolean" ? saved.EPIC : true,
-              };
+      if (!loadedScopedSourcePreferences) {
+        const savedShipDurations = readFirstStoredString([LOCAL_PREF_KEYS.plannerShipDurations]);
+        if (savedShipDurations) {
+          try {
+            const parsed = normalizeShipDurations(JSON.parse(savedShipDurations));
+            if (parsed) {
+              setShipDurations(parsed);
             }
+          } catch {
+            // Ignore malformed saved ship durations.
           }
-          setShipDurations(merged);
-        } catch {
-          // Ignore malformed saved ship durations.
         }
       }
     } catch {
@@ -1903,6 +2149,17 @@ export default function MissionCraftPlannerPage() {
       return;
     }
     try {
+      writeStoredString([LOCAL_PREF_KEYS.plannerVirtuePriorityTimePct], String(virtuePriorityTimePct));
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+  }, [virtuePriorityTimePct, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    try {
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerFastMode], fastMode);
     } catch {
       // Ignore localStorage persistence errors.
@@ -2019,6 +2276,36 @@ export default function MissionCraftPlannerPage() {
     }
   }, [shipDurations, prefsLoaded]);
 
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    if (skipNextScopedPreferenceSaveRef.current) {
+      skipNextScopedPreferenceSaveRef.current = false;
+      return;
+    }
+    try {
+      writePlannerSourcePreferences(inventorySource, buildCurrentSourcePreferences());
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+  }, [
+    targetRows,
+    targetCraftedOnly,
+    includeSlotted,
+    includeInventoryRare,
+    includeInventoryEpic,
+    includeInventoryLegendary,
+    includeInventoryFragments,
+    includeDropRare,
+    includeDropEpic,
+    includeDropLegendary,
+    includeDropFragments,
+    shipDurations,
+    inventorySource,
+    prefsLoaded,
+  ]);
+
   async function runBuildPlan() {
     const normalizedTargets = solveTargets.length > 0 ? solveTargets : [{ targetItemId, quantity }];
     const primaryTarget = normalizedTargets[0];
@@ -2031,7 +2318,7 @@ export default function MissionCraftPlannerPage() {
       quantity: normalizedQuantity,
       targets: normalizedTargets,
       targetCraftedOnly,
-      priorityTime: priorityTimePct / 100,
+      priorityTime: activePriorityTimePct / 100,
       fastMode,
       allowedShipDurations: allowedShipDurationsForSolve,
       sourceFilters: { ...sourceFilters },
@@ -2063,6 +2350,8 @@ export default function MissionCraftPlannerPage() {
       writeStoredString([LOCAL_PREF_KEYS.plannerQuantity], String(normalizedQuantity));
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly], targetCraftedOnly);
       writeStoredString([LOCAL_PREF_KEYS.plannerPriorityTimePct], String(priorityTimePct));
+      writeStoredString([LOCAL_PREF_KEYS.plannerVirtuePriorityTimePct], String(virtuePriorityTimePct));
+      writePlannerSourcePreferences(inventorySource, buildCurrentSourcePreferences());
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerFastMode], fastMode);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryRare], includeInventoryRare);
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerIncludeInventoryEpic], includeInventoryEpic);
@@ -2106,8 +2395,9 @@ export default function MissionCraftPlannerPage() {
           profile as Parameters<typeof planForTarget>[0],
           primaryTarget.targetItemId,
           normalizedQuantity,
-          priorityTimePct / 100,
+          activePriorityTimePct / 100,
           {
+            objectiveMode: inventorySource === "virtue" ? "virtueFuel" : "ge",
             fastMode,
             missionDropRarities: {
               rare: includeDropRare,
@@ -2157,7 +2447,7 @@ export default function MissionCraftPlannerPage() {
           targetItemId: primaryTarget.targetItemId,
           targets: normalizedTargets,
           quantity: normalizedQuantity,
-          priorityTime: priorityTimePct / 100,
+          priorityTime: activePriorityTimePct / 100,
           inventorySource,
           includeSlotted,
           includeInventoryRare,
@@ -2329,7 +2619,8 @@ export default function MissionCraftPlannerPage() {
           targetItemId: primaryTarget.targetItemId,
           targets: normalizedTargets,
           quantity: normalizedQuantity,
-          priorityTime: priorityTimePct / 100,
+          priorityTime: activePriorityTimePct / 100,
+          inventorySource,
           targetCraftedOnly,
           fastMode,
           includeDropRare,
@@ -2359,7 +2650,7 @@ export default function MissionCraftPlannerPage() {
         targetItemId: primaryTarget.targetItemId,
         quantity: normalizedQuantity,
         targets: normalizedTargets,
-        priorityTime: priorityTimePct / 100,
+        priorityTime: activePriorityTimePct / 100,
         targetCraftedOnly,
         fastMode,
         allowedShipDurations: allowedShipDurationsForReplan,
@@ -2741,7 +3032,7 @@ export default function MissionCraftPlannerPage() {
                       id="planner-inventory-source"
                       className={styles.selectInput}
                       value={inventorySource}
-                      onChange={(event) => setInventorySource(event.target.value as InventorySource)}
+                      onChange={(event) => handleInventorySourceChange(event.target.value as InventorySource)}
                     >
                       <option value="main">Main farm</option>
                       <option value="virtue">Path of Virtue</option>
@@ -3054,19 +3345,19 @@ export default function MissionCraftPlannerPage() {
 
             <div className={styles.buildCard}>
               <div className={styles.sliderBlock}>
-                <div className={styles.sliderWrap} style={{ "--pct": `${priorityTimePct}%` } as CSSProperties}>
+                <div className={styles.sliderWrap} style={{ "--pct": `${activePriorityTimePct}%` } as CSSProperties}>
                   <input
                     id="priority"
                     type="range"
                     min={0}
                     max={100}
-                    value={priorityTimePct}
-                    onChange={(event) => setPriorityTimePct(Number(event.target.value))}
+                    value={activePriorityTimePct}
+                    onChange={(event) => setActivePriorityTimePct(Number(event.target.value))}
                     aria-label="Optimization priority"
                   />
                 </div>
                 <div className={styles.sliderLabels}>
-                  <span>Save GE</span>
+                  <span>{inventorySource === "virtue" ? "Save fuel" : "Save GE"}</span>
                   <b>Balance</b>
                   <span>Save time</span>
                 </div>
@@ -3247,6 +3538,53 @@ export default function MissionCraftPlannerPage() {
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {virtueFuelCharts && (
+              <div className={styles.fuelPanel}>
+                <div className={styles.fuelHeader}>
+                  <span>Virtue fuel use</span>
+                  <span className={styles.fuelHeaderMuted}>
+                    Humility excluded total: {formatVirtueFuelQuantity(virtueFuelCharts.total)}
+                  </span>
+                </div>
+                <div className={styles.fuelRows}>
+                  {virtueFuelCharts.rows.map((row) => (
+                    <div key={row.fuel} className={styles.fuelRow}>
+                      <div className={styles.fuelLabel}>
+                        <img className={styles.fuelIcon} src={row.imageSrc} alt={`${row.label} egg`} loading="lazy" />
+                        <span>{row.label}</span>
+                      </div>
+                      <div className={styles.fuelTrack} aria-label={`${row.label} fuel use`}>
+                        {row.segments.map((segment) => {
+                          const widthPct = (segment.quantity / virtueFuelCharts.maxTotal) * 100;
+                          const quantityLabel = formatVirtueFuelQuantity(segment.quantity);
+                          return (
+                            <div
+                              key={segment.id}
+                              className={styles.fuelSegment}
+                              style={
+                                {
+                                  width: `${widthPct}%`,
+                                  "--fuel-segment-color": segment.color,
+                                } as CSSProperties
+                              }
+                              title={[
+                                segment.label,
+                                segment.subtitle,
+                                `${quantityLabel} ${row.label}`,
+                                `Total ${row.label}: ${formatVirtueFuelQuantity(row.total)}`,
+                              ].join("\n")}
+                            >
+                              <span className={styles.fuelSegmentLabel}>{quantityLabel}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className={styles.fuelTotal}>{formatVirtueFuelQuantity(row.total)}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

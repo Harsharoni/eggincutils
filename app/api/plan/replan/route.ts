@@ -51,6 +51,7 @@ export async function POST(request: Request): Promise<Response> {
       parsedPayload.data.quantity,
       parsedPayload.data.priorityTime,
       {
+        objectiveMode: parsedPayload.data.inventorySource === "virtue" ? "virtueFuel" : "ge",
         fastMode: parsedPayload.data.fastMode,
         missionDropRarities: {
           rare: parsedPayload.data.includeDropRare,
