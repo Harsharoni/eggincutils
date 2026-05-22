@@ -5,6 +5,7 @@ export const LOCAL_PREF_KEYS = {
   legacyEid: "eid",
   legacyIncludeSlotted: "includeSlottedStones",
   plannerTargetItemId: "eggincutils-planner-target-item-id",
+  plannerTargets: "eggincutils-planner-targets",
   plannerQuantity: "eggincutils-planner-quantity",
   plannerTargetCraftedOnly: "eggincutils-planner-target-crafted-only",
   plannerPriorityTimePct: "eggincutils-planner-priority-time-pct",

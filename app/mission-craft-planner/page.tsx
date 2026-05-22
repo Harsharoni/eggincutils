@@ -987,6 +987,52 @@ function targetTierNumber(itemKey: string, displayTierNumber?: number): number {
   return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 }
 
+function normalizedTargetQuantity(rawValue: string): number {
+  return Math.max(1, Math.min(9999, Math.round(Number(rawValue) || 1)));
+}
+
+function parseStoredTargetRows(raw: string | null, targetOptions: TargetOption[]): PlannerTargetRow[] | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const availableTargets = new Set(targetOptions.map((option) => option.itemId));
+    const rows: PlannerTargetRow[] = [];
+    for (const value of parsed) {
+      if (!value || typeof value !== "object" || rows.length >= 10) {
+        continue;
+      }
+      const record = value as { targetItemId?: unknown; itemId?: unknown; quantity?: unknown; quantityInput?: unknown };
+      const itemId = typeof record.targetItemId === "string"
+        ? record.targetItemId
+        : typeof record.itemId === "string"
+          ? record.itemId
+          : "";
+      if (!availableTargets.has(itemId)) {
+        continue;
+      }
+      const quantity = Math.max(1, Math.min(9999, Math.round(Number(record.quantity ?? record.quantityInput) || 1)));
+      rows.push({ id: `target-${rows.length + 1}`, itemId, quantityInput: String(quantity) });
+    }
+    return rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
+}
+
+function serializeTargetRows(rows: PlannerTargetRow[]): string {
+  return JSON.stringify(
+    rows.map((row) => ({
+      targetItemId: row.itemId,
+      quantity: normalizedTargetQuantity(row.quantityInput),
+    }))
+  );
+}
+
 function profileUrl(eid: string, filters: PlannerSourceFilters): string {
   const params = new URLSearchParams({
     eid,
@@ -1266,7 +1312,7 @@ export default function MissionCraftPlannerPage() {
     () =>
       targetRows.map((row) => ({
         targetItemId: row.itemId,
-        quantity: Math.max(1, Math.min(9999, Math.round(Number(row.quantityInput) || 1))),
+        quantity: normalizedTargetQuantity(row.quantityInput),
       })),
     [targetRows]
   );
@@ -1581,24 +1627,38 @@ export default function MissionCraftPlannerPage() {
       if (savedInventorySource === "main" || savedInventorySource === "virtue") {
         setInventorySource(savedInventorySource);
       }
-      const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
-      if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
-        setTargetItemId(savedTarget);
-        setTargetRows((rows) => {
-          const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: savedTarget, quantityInput: "1" }];
-          next[0] = { ...next[0], itemId: savedTarget };
-          return next;
-        });
-      }
-      const savedQuantity = readStoredInteger([LOCAL_PREF_KEYS.plannerQuantity], 1, 9999);
-      if (savedQuantity != null) {
-        setQuantity(savedQuantity);
-        setQuantityInput(String(savedQuantity));
-        setTargetRows((rows) => {
-          const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: targetItemId, quantityInput: String(savedQuantity) }];
-          next[0] = { ...next[0], quantityInput: String(savedQuantity) };
-          return next;
-        });
+      const savedTargetRows = parseStoredTargetRows(
+        readFirstStoredString([LOCAL_PREF_KEYS.plannerTargets]),
+        targetOptions
+      );
+      if (savedTargetRows) {
+        const primaryTarget = savedTargetRows[0];
+        setTargetRows(savedTargetRows);
+        setActiveTargetRowId(primaryTarget.id);
+        setTargetItemId(primaryTarget.itemId);
+        const primaryQuantity = normalizedTargetQuantity(primaryTarget.quantityInput);
+        setQuantity(primaryQuantity);
+        setQuantityInput(String(primaryQuantity));
+      } else {
+        const savedTarget = readFirstStoredString([LOCAL_PREF_KEYS.plannerTargetItemId]);
+        if (savedTarget && targetOptions.some((option) => option.itemId === savedTarget)) {
+          setTargetItemId(savedTarget);
+          setTargetRows((rows) => {
+            const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: savedTarget, quantityInput: "1" }];
+            next[0] = { ...next[0], itemId: savedTarget };
+            return next;
+          });
+        }
+        const savedQuantity = readStoredInteger([LOCAL_PREF_KEYS.plannerQuantity], 1, 9999);
+        if (savedQuantity != null) {
+          setQuantity(savedQuantity);
+          setQuantityInput(String(savedQuantity));
+          setTargetRows((rows) => {
+            const next = rows.length > 0 ? [...rows] : [{ id: "target-1", itemId: targetItemId, quantityInput: String(savedQuantity) }];
+            next[0] = { ...next[0], quantityInput: String(savedQuantity) };
+            return next;
+          });
+        }
       }
       const savedTargetCraftedOnly = readStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly]);
       if (savedTargetCraftedOnly != null) {
@@ -1782,6 +1842,17 @@ export default function MissionCraftPlannerPage() {
       // Ignore localStorage persistence errors.
     }
   }, [includeSlotted, prefsLoaded]);
+
+  useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    try {
+      writeStoredString([LOCAL_PREF_KEYS.plannerTargets], serializeTargetRows(targetRows));
+    } catch {
+      // Ignore localStorage persistence errors.
+    }
+  }, [targetRows, prefsLoaded]);
 
   useEffect(() => {
     if (!prefsLoaded) {
@@ -1987,6 +2058,7 @@ export default function MissionCraftPlannerPage() {
       writeStoredString(SHARED_EID_KEYS, trimmedEid);
       writeStoredString([LOCAL_PREF_KEYS.plannerInventorySource], inventorySource);
       writeStoredBoolean(SHARED_INCLUDE_SLOTTED_KEYS, includeSlotted);
+      writeStoredString([LOCAL_PREF_KEYS.plannerTargets], JSON.stringify(normalizedTargets));
       writeStoredString([LOCAL_PREF_KEYS.plannerTargetItemId], primaryTarget.targetItemId);
       writeStoredString([LOCAL_PREF_KEYS.plannerQuantity], String(normalizedQuantity));
       writeStoredBoolean([LOCAL_PREF_KEYS.plannerTargetCraftedOnly], targetCraftedOnly);
