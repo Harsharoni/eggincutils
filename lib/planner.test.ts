@@ -311,6 +311,56 @@ describe("planForTarget coverage handling", () => {
     expect(result.missions[0].targetAfxId).toBe(10000);
   });
 
+  it("filters impossible targeted rows from ships that cannot target in game", async () => {
+    mockedLoadLootData.mockResolvedValue({
+      missions: [
+        {
+          afxShip: 3,
+          afxDurationType: 0,
+          missionId: "bcr-short",
+          levels: [
+            {
+              level: 0,
+              targets: [
+                {
+                  totalDrops: 5000,
+                  targetAfxId: 1,
+                  items: [{ afxId: 23, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
+                },
+                {
+                  totalDrops: 5000,
+                  targetAfxId: 10000,
+                  items: [{ afxId: 23, afxLevel: 1, itemId: "puzzle-cube-1", counts: [5000, 0, 0, 0] }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    mockedSolveWithHighs.mockResolvedValue({
+      Status: "Optimal",
+      Columns: { m_0: { Primal: 1 } },
+    });
+
+    const profile = baseProfile();
+    profile.missionOptions = [
+      {
+        ship: "BCR",
+        missionId: "bcr-short",
+        durationType: "SHORT",
+        level: 0,
+        durationSeconds: 1200,
+        capacity: 1,
+      },
+    ];
+
+    const result = await planForTarget(profile, "puzzle-cube-1", 1, 0.5);
+    expect(result.missions).toHaveLength(1);
+    expect(result.missions[0].targetAfxId).toBe(10000);
+    expect(result.availableCombos).toEqual([{ ship: "BCR", durationType: "SHORT", targetAfxId: 10000 }]);
+  });
+
   it("respects allowedShipDurations by filtering mission options before solve", async () => {
     mockedLoadLootData.mockResolvedValue({
       missions: [

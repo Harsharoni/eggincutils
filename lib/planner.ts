@@ -47,6 +47,7 @@ type ConsumptionOption = {
 };
 
 const ARTIFACT_CONSUMPTION = artifactConsumptionData as ArtifactConsumptionMap;
+const UNTARGETED_ONLY_SHIPS = new Set(["CHICKEN_ONE", "CHICKEN_NINE", "CHICKEN_HEAVY", "BCR"]);
 
 type PlanMissionRow = {
   missionId: string;
@@ -781,6 +782,10 @@ function hasEnoughMissionTargetSample(
   return target.totalDrops / nominalCapacity >= MIN_MISSION_TARGET_SAMPLE_LAUNCHES;
 }
 
+function canMissionOptionUseLootTarget(option: MissionOption, targetAfxId: number): boolean {
+  return !UNTARGETED_ONLY_SHIPS.has(option.ship) || isUntargetedTargetAfxId(targetAfxId);
+}
+
 async function buildMissionActionsForOptions(
   missionOptions: MissionOption[],
   relevantItems: Set<string>,
@@ -806,6 +811,9 @@ async function buildMissionActionsForOptions(
     }
 
     for (const target of levelLoot.targets) {
+      if (!canMissionOptionUseLootTarget(option, target.targetAfxId)) {
+        continue;
+      }
       if (!hasEnoughMissionTargetSample(target, option, levelLoot.level)) {
         continue;
       }

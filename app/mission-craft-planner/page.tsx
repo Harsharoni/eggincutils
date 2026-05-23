@@ -1106,7 +1106,7 @@ function compactShipName(ship: string): string {
     VOYEGGER: "Voyegger",
     CHICKFIANT: "Defihent",
     GALEGGTICA: "Galeggtica",
-    CORELLIHEN_CORVETTE: "Corvette",
+    CORELLIHEN_CORVETTE: "CHC",
     MILLENIUM_CHICKEN: "Quintillion",
     BCR: "BCR",
     CHICKEN_HEAVY: "Heavy",
