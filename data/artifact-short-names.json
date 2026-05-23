@@ -1,0 +1,86 @@
+[
+  {
+    "familyKey": "puzzle_cube",
+    "shortName": "Cube"
+  },
+  {
+    "familyKey": "lunar_totem",
+    "shortName": "Totem"
+  },
+  {
+    "familyKey": "demeters_necklace",
+    "shortName": "Neck."
+  },
+  {
+    "familyKey": "vial_martian_dust",
+    "shortName": "Vial"
+  },
+  {
+    "familyKey": "aurelian_brooch",
+    "shortName": "Brooch"
+  },
+  {
+    "familyKey": "tungsten_ankh",
+    "shortName": "Ankh"
+  },
+  {
+    "familyKey": "ornate_gusset",
+    "shortName": "Gusset"
+  },
+  {
+    "familyKey": "neodymium_medallion",
+    "shortName": "Medal"
+  },
+  {
+    "familyKey": "mercurys_lens",
+    "shortName": "Lens"
+  },
+  {
+    "familyKey": "beak_of_midas",
+    "shortName": "Beak"
+  },
+  {
+    "familyKey": "carved_rainstick",
+    "shortName": "Stick"
+  },
+  {
+    "familyKey": "interstellar_compass",
+    "shortName": "Compass"
+  },
+  {
+    "familyKey": "the_chalice",
+    "shortName": "Chalice"
+  },
+  {
+    "familyKey": "phoenix_feather",
+    "shortName": "Feather"
+  },
+  {
+    "familyKey": "quantum_metronome",
+    "shortName": "Metro"
+  },
+  {
+    "familyKey": "dilithium_monocle",
+    "shortName": "Monocle"
+  },
+  {
+    "familyKey": "titanium_actuator",
+    "shortName": "Actu."
+  },
+  {
+    "familyKey": "ship_in_a_bottle",
+    "shortName": "Ship"
+  },
+  {
+    "familyKey": "tachyon_deflector",
+    "shortName": "Defl."
+  },
+  {
+    "familyKey": "book_of_basan",
+    "shortName": "BoB"
+  },
+  {
+    "familyKey": "light_of_eggendil",
+    "shortName": "LoE"
+  }
+]

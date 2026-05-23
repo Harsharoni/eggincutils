@@ -26,6 +26,7 @@ export async function POST(request: Request): Promise<Response> {
     const results = await computeMonolithicPaths({
       profile: parsed.data.profile,
       targetItemId: parsed.data.targetItemId,
+      targets: parsed.data.targets,
       quantity: parsed.data.quantity,
       priorityTime: parsed.data.priorityTime,
       selectedCombos: parsed.data.selectedCombos,
@@ -36,6 +37,7 @@ export async function POST(request: Request): Promise<Response> {
         fragments: parsed.data.includeDropFragments,
       },
       targetCraftedOnly: parsed.data.targetCraftedOnly,
+      selectedConsumptionItemIds: parsed.data.selectedConsumptionItemIds,
     });
 
     return new Response(JSON.stringify({ paths: results }), { status: 200 });

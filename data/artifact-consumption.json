@@ -1,0 +1,321 @@
+{
+  "lunar_totem_2": {
+    "lunar_stone_1": 1.9278,
+    "terra_stone_1": 0.0361
+  },
+  "lunar_totem_3": {
+    "lunar_stone_1": 4.6283,
+    "terra_stone_1": 0.0992
+  },
+  "lunar_totem_4": {
+    "lunar_stone_1": 6.4648,
+    "terra_stone_1": 0.1593,
+    "lunar_stone_2": 0.0361
+  },
+  "neodymium_medallion_1": {
+    "lunar_stone_1": 1.728,
+    "quantum_stone_1": 0.136
+  },
+  "neodymium_medallion_2": {
+    "lunar_stone_1": 3.2462,
+    "quantum_stone_1": 0.3769
+  },
+  "neodymium_medallion_3": {
+    "lunar_stone_1": 4.7232,
+    "quantum_stone_1": 0.5925,
+    "lunar_stone_2": 0.0153
+  },
+  "neodymium_medallion_4": {
+    "lunar_stone_1": 6.8207,
+    "quantum_stone_1": 0.8979,
+    "lunar_stone_2": 0.0621
+  },
+  "beak_of_midas_1": {
+    "shell_stone_1": 1.9818,
+    "prophecy_stone_1": 0.0091
+  },
+  "beak_of_midas_2": {
+    "shell_stone_1": 3.9472,
+    "prophecy_stone_1": 0.0176
+  },
+  "beak_of_midas_3": {
+    "shell_stone_1": 5.4972,
+    "shell_stone_2": 0.0879,
+    "prophecy_stone_1": 0.0211
+  },
+  "beak_of_midas_4": {
+    "shell_stone_1": 7.7473,
+    "shell_stone_2": 0.1984,
+    "prophecy_stone_1": 0.0295
+  },
+  "light_of_eggendil_1": {
+    "clarity_stone_1": 1.7444,
+    "prophecy_stone_1": 0.2556
+  },
+  "light_of_eggendil_2": {
+    "clarity_stone_1": 1.7459,
+    "prophecy_stone_1": 0.2541
+  },
+  "light_of_eggendil_3": {
+    "clarity_stone_1": 2.6144,
+    "prophecy_stone_1": 0.3856
+  },
+  "light_of_eggendil_4": {
+    "clarity_stone_1": 3.398,
+    "prophecy_stone_1": 0.466,
+    "clarity_stone_2": 0.034
+  },
+  "demeters_necklace_1": {
+    "shell_stone_1": 0.9463
+  },
+  "demeters_necklace_2": {
+    "shell_stone_1": 2
+  },
+  "demeters_necklace_3": {
+    "shell_stone_1": 3.9505,
+    "prophecy_stone_1": 0.0165
+  },
+  "demeters_necklace_4": {
+    "shell_stone_1": 6.2939,
+    "shell_stone_2": 0.127,
+    "prophecy_stone_1": 0.0237
+  },
+  "vial_martian_dust_1": {
+    "lunar_stone_1": 1
+  },
+  "vial_martian_dust_2": {
+    "lunar_stone_1": 2.572,
+    "terra_stone_1": 0.714
+  },
+  "vial_martian_dust_3": {
+    "lunar_stone_1": 3.7915,
+    "terra_stone_1": 1.3434,
+    "lunar_stone_2": 0.019
+  },
+  "vial_martian_dust_4": {
+    "terra_stone_1": 2.2478,
+    "lunar_stone_1": 5.3606,
+    "terra_stone_2": 0.0455,
+    "lunar_stone_2": 0.0543
+  },
+  "ornate_gusset_1": {
+    "terra_stone_1": 0.6629,
+    "life_stone_1": 0.3296
+  },
+  "ornate_gusset_2": {
+    "terra_stone_1": 1.3442,
+    "life_stone_1": 0.6558
+  },
+  "ornate_gusset_3": {
+    "terra_stone_1": 2.0046,
+    "life_stone_1": 0.9954
+  },
+  "ornate_gusset_4": {
+    "terra_stone_1": 3.1575,
+    "life_stone_1": 1.439,
+    "terra_stone_2": 0.085,
+    "life_stone_2": 0.0127
+  },
+  "the_chalice_1": {
+    "life_stone_1": 1
+  },
+  "the_chalice_2": {
+    "life_stone_1": 2
+  },
+  "the_chalice_3": {
+    "life_stone_1": 3
+  },
+  "the_chalice_4": {
+    "life_stone_1": 4.4762,
+    "life_stone_2": 0.0494
+  },
+  "book_of_basan_1": {
+    "shell_stone_1": 5.2474,
+    "shell_stone_2": 0.0814,
+    "prophecy_stone_1": 0.1152
+  },
+  "book_of_basan_2": {
+    "shell_stone_1": 6.7323,
+    "prophecy_stone_1": 0.1704,
+    "shell_stone_2": 0.1513
+  },
+  "book_of_basan_3": {
+    "shell_stone_1": 8.3809,
+    "prophecy_stone_1": 0.2421,
+    "shell_stone_2": 0.2535
+  },
+  "book_of_basan_4": {
+    "shell_stone_1": 10.3033,
+    "shell_stone_2": 0.3285,
+    "prophecy_stone_1": 0.2945,
+    "shell_stone_3": 0.0219
+  },
+  "phoenix_feather_1": {
+    "soul_stone_1": 2
+  },
+  "phoenix_feather_2": {
+    "soul_stone_1": 2.9973
+  },
+  "phoenix_feather_3": {
+    "soul_stone_1": 3.9993
+  },
+  "phoenix_feather_4": {
+    "soul_stone_1": 5.4655,
+    "soul_stone_2": 0.1069
+  },
+  "tungsten_ankh_1": {
+    "shell_stone_1": 1
+  },
+  "tungsten_ankh_2": {
+    "shell_stone_1": 3.9969
+  },
+  "tungsten_ankh_3": {
+    "shell_stone_1": 5.573,
+    "shell_stone_2": 0.0854
+  },
+  "tungsten_ankh_4": {
+    "shell_stone_1": 7.9835,
+    "shell_stone_2": 0.2033
+  },
+  "aurelian_brooch_2": {
+    "quantum_stone_1": 1
+  },
+  "aurelian_brooch_3": {
+    "quantum_stone_1": 2.9681
+  },
+  "aurelian_brooch_4": {
+    "quantum_stone_1": 4
+  },
+  "carved_rainstick_1": {
+    "shell_stone_1": 2.2128,
+    "terra_stone_1": 0.3936
+  },
+  "carved_rainstick_2": {
+    "shell_stone_1": 3.3741,
+    "terra_stone_1": 0.6951,
+    "shell_stone_2": 0.036
+  },
+  "carved_rainstick_3": {
+    "shell_stone_1": 4.576,
+    "terra_stone_1": 0.9741,
+    "shell_stone_2": 0.0945
+  },
+  "carved_rainstick_4": {
+    "terra_stone_1": 1.3643,
+    "shell_stone_1": 6.1574,
+    "terra_stone_2": 0.0315,
+    "shell_stone_2": 0.173
+  },
+  "puzzle_cube_2": {
+    "shell_stone_1": 1.5396,
+    "dilithium_stone_1": 0.2242
+  },
+  "puzzle_cube_3": {
+    "shell_stone_1": 3.3525,
+    "dilithium_stone_1": 0.73,
+    "shell_stone_2": 0.0375
+  },
+  "puzzle_cube_4": {
+    "dilithium_stone_1": 1.304,
+    "shell_stone_1": 5.6526,
+    "shell_stone_2": 0.1464
+  },
+  "quantum_metronome_1": {
+    "quantum_stone_1": 2
+  },
+  "quantum_metronome_2": {
+    "quantum_stone_1": 3
+  },
+  "quantum_metronome_3": {
+    "quantum_stone_1": 4
+  },
+  "quantum_metronome_4": {
+    "quantum_stone_1": 5.5505,
+    "quantum_stone_2": 0.0899
+  },
+  "ship_in_a_bottle_1": {
+    "prophecy_stone_1": 1
+  },
+  "ship_in_a_bottle_2": {
+    "prophecy_stone_1": 2
+  },
+  "ship_in_a_bottle_3": {
+    "prophecy_stone_1": 3
+  },
+  "ship_in_a_bottle_4": {
+    "prophecy_stone_1": 4
+  },
+  "tachyon_deflector_1": {
+    "tachyon_stone_1": 3.6829,
+    "tachyon_stone_2": 0.0773
+  },
+  "tachyon_deflector_2": {
+    "tachyon_stone_1": 4.3905,
+    "tachyon_stone_2": 0.1523
+  },
+  "tachyon_deflector_3": {
+    "tachyon_stone_1": 5.8336,
+    "tachyon_stone_2": 0.2916
+  },
+  "tachyon_deflector_4": {
+    "tachyon_stone_1": 7.1225,
+    "tachyon_stone_3": 0.0336,
+    "tachyon_stone_2": 0.4108
+  },
+  "interstellar_compass_1": {
+    "quantum_stone_1": 1
+  },
+  "interstellar_compass_2": {
+    "quantum_stone_1": 2
+  },
+  "interstellar_compass_3": {
+    "quantum_stone_1": 3
+  },
+  "interstellar_compass_4": {
+    "quantum_stone_1": 4.769,
+    "quantum_stone_2": 0.0462
+  },
+  "dilithium_monocle_1": {
+    "dilithium_stone_1": 2
+  },
+  "dilithium_monocle_2": {
+    "dilithium_stone_1": 3
+  },
+  "dilithium_monocle_3": {
+    "dilithium_stone_1": 4
+  },
+  "dilithium_monocle_4": {
+    "dilithium_stone_1": 5.7894,
+    "dilithium_stone_2": 0.0351
+  },
+  "titanium_actuator_1": {
+    "tachyon_stone_1": 2.9898
+  },
+  "titanium_actuator_2": {
+    "tachyon_stone_1": 3.7,
+    "tachyon_stone_2": 0.075
+  },
+  "titanium_actuator_3": {
+    "tachyon_stone_2": 0.2232,
+    "tachyon_stone_1": 5.1071
+  },
+  "titanium_actuator_4": {
+    "tachyon_stone_1": 6.286,
+    "tachyon_stone_2": 0.3358,
+    "tachyon_stone_3": 0.0191
+  },
+  "mercurys_lens_1": {
+    "shell_stone_1": 2
+  },
+  "mercurys_lens_2": {
+    "shell_stone_1": 4
+  },
+  "mercurys_lens_3": {
+    "shell_stone_1": 5.583,
+    "shell_stone_2": 0.0834
+  },
+  "mercurys_lens_4": {
+    "shell_stone_1": 9.6218,
+    "shell_stone_2": 0.2693
+  }
+}

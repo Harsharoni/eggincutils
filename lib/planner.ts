@@ -1,5 +1,6 @@
 import type { LootJson, MissionLevelLootStore, MissionTargetLootStore } from "./loot-data";
 import type { HighsSolveResult } from "./highs";
+import artifactConsumptionData from "../data/artifact-consumption.json";
 import { isStoneFragmentKey, isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
 import { getRecipe, recipes } from "./recipes";
 import {
@@ -38,6 +39,15 @@ type MissionAction = {
   yields: Record<string, number>;
 };
 
+type ArtifactConsumptionMap = Record<string, Record<string, number>>;
+
+type ConsumptionOption = {
+  sourceItemKey: string;
+  yields: Record<string, number>;
+};
+
+const ARTIFACT_CONSUMPTION = artifactConsumptionData as ArtifactConsumptionMap;
+
 type PlanMissionRow = {
   missionId: string;
   ship: string;
@@ -52,6 +62,12 @@ type PlanMissionRow = {
 type PlanCraftRow = {
   itemId: string;
   count: number;
+};
+
+type PlanConsumptionRow = {
+  itemId: string;
+  count: number;
+  yields: Array<{ itemId: string; quantity: number }>;
 };
 
 type ProgressionLaunchRow = {
@@ -117,6 +133,7 @@ export type PlannerResult = {
   expectedHours: number;
   weightedScore: number;
   crafts: PlanCraftRow[];
+  consumptions: PlanConsumptionRow[];
   missions: PlanMissionRow[];
   unmetItems: Array<{ itemId: string; quantity: number }>;
   targetBreakdown: TargetBreakdown;
@@ -145,6 +162,7 @@ export type PlannerOptions = {
   targetCraftedOnly?: boolean;
   missionDropRarities?: Partial<ShinyRaritySelection>;
   allowedShipDurations?: Array<{ ship: string; durationType: string }>;
+  selectedConsumptionItemIds?: string[];
   maxSolveMs?: number;
   onProgress?: (event: PlannerProgressEvent) => void;
   onBenchmarkSample?: (sample: PlannerBenchmarkSample) => void;
@@ -545,6 +563,76 @@ function collectClosure(itemKey: string, visited: Set<string>): void {
   }
 }
 
+function isCraftedOnlyEligibleGoalKey(itemKey: string): boolean {
+  if (/_stone_\d+$/.test(itemKey)) {
+    return false;
+  }
+  return !(
+    /^gold_meteorite_\d+$/.test(itemKey) ||
+    /^tau_ceti_geode_\d+$/.test(itemKey) ||
+    /^solar_titanium_\d+$/.test(itemKey)
+  );
+}
+
+function normalizeConsumptionItemKeys(itemIds?: string[]): Set<string> {
+  const selected = new Set<string>();
+  for (const itemId of itemIds || []) {
+    if (typeof itemId !== "string" || itemId.trim().length === 0) {
+      continue;
+    }
+    const itemKey = itemIdToCanonicalKey(itemId.trim());
+    if (ARTIFACT_CONSUMPTION[itemKey]) {
+      selected.add(itemKey);
+    }
+  }
+  return selected;
+}
+
+function buildConsumptionOptionsForClosure(
+  selectedItemKeys: Set<string>,
+  closure: Set<string>
+): ConsumptionOption[] {
+  const options: ConsumptionOption[] = [];
+  for (const sourceItemKey of Array.from(selectedItemKeys).sort()) {
+    const rawYields = ARTIFACT_CONSUMPTION[sourceItemKey];
+    if (!rawYields) {
+      continue;
+    }
+    const usefulYields: Record<string, number> = {};
+    for (const [outputItemKey, quantity] of Object.entries(rawYields)) {
+      const safeQuantity = Math.max(0, quantity);
+      if (safeQuantity > SCORE_EPS && closure.has(outputItemKey)) {
+        usefulYields[outputItemKey] = safeQuantity;
+      }
+    }
+    if (Object.keys(usefulYields).length === 0) {
+      continue;
+    }
+    collectClosure(sourceItemKey, closure);
+    options.push({ sourceItemKey, yields: usefulYields });
+  }
+  return options;
+}
+
+function consumptionProducedByItem(
+  itemKey: string,
+  consumptions: Record<string, number>,
+  consumptionOptions: ConsumptionOption[]
+): number {
+  let total = 0;
+  for (const option of consumptionOptions) {
+    const count = Math.max(0, Math.round(consumptions[option.sourceItemKey] || 0));
+    if (count <= 0) {
+      continue;
+    }
+    const yieldQty = option.yields[itemKey] || 0;
+    if (yieldQty > 0) {
+      total += count * yieldQty;
+    }
+  }
+  return total;
+}
+
 function collectCraftUpperBounds(
   itemKey: string,
   quantity: number,
@@ -570,10 +658,32 @@ function estimateCraftUpperBounds(targetKey: string, quantity: number): Record<s
   return totals;
 }
 
-function estimateCraftUpperBoundsForTargets(targetDemandByItem: Map<string, number>): Record<string, number> {
+function estimateCraftUpperBoundsForTargets(
+  targetDemandByItem: Map<string, number>,
+  consumptionOptions: ConsumptionOption[] = []
+): Record<string, number> {
   const totals: Record<string, number> = {};
   for (const [targetKey, quantity] of targetDemandByItem.entries()) {
     collectCraftUpperBounds(targetKey, Math.max(0, Math.round(quantity)), totals);
+  }
+  const directDemand = new Map<string, number>();
+  for (const [targetKey, quantity] of targetDemandByItem.entries()) {
+    directDemand.set(targetKey, Math.max(0, Math.round(quantity)));
+  }
+  for (const option of consumptionOptions) {
+    let sourceCountBound = 0;
+    for (const [outputItemKey, yieldQty] of Object.entries(option.yields)) {
+      if (yieldQty <= SCORE_EPS) {
+        continue;
+      }
+      const outputNeed = Math.max(0, (totals[outputItemKey] || 0) + (directDemand.get(outputItemKey) || 0));
+      if (outputNeed > 0) {
+        sourceCountBound = Math.max(sourceCountBound, Math.ceil(outputNeed / yieldQty));
+      }
+    }
+    if (sourceCountBound > 0) {
+      collectCraftUpperBounds(option.sourceItemKey, sourceCountBound, totals);
+    }
   }
   return totals;
 }
@@ -1099,6 +1209,7 @@ async function allocateMissionsWithSolver(
 
 type UnifiedPlan = {
   crafts: Record<string, number>;
+  consumptions: Record<string, number>;
   missionCounts: Record<string, number>;
   remainingDemand: Record<string, number>;
   geCost: number;
@@ -1173,6 +1284,7 @@ function buildCraftModelSkeleton(options: {
   quantity: number;
   closure: Set<string>;
   targetDemandByItem?: Map<string, number>;
+  consumptionOptions?: ConsumptionOption[];
 }): CraftModelSkeleton {
   const { profile, targetKey, quantity, closure } = options;
   const itemKeys = Array.from(closure).sort();
@@ -1184,7 +1296,7 @@ function buildCraftModelSkeleton(options: {
   const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
     ? options.targetDemandByItem
     : new Map([[targetKey, quantity]]);
-  const craftUpperBounds = estimateCraftUpperBoundsForTargets(targetDemandByItem);
+  const craftUpperBounds = estimateCraftUpperBoundsForTargets(targetDemandByItem, options.consumptionOptions || []);
   const craftModels: CraftCostModel[] = [];
   const craftModelByItem = new Map<string, CraftCostModel>();
 
@@ -1276,6 +1388,7 @@ async function solveUnifiedCraftMissionPlan(options: {
   lpRelaxation?: boolean;
   targetCraftedOnly?: boolean;
   targetCraftedOnlyKeys?: Set<string>;
+  consumptionOptions?: ConsumptionOption[];
   craftSkeleton?: CraftModelSkeleton;
   onSolveMetrics?: (metrics: UnifiedSolveMetrics) => void;
   solverFn?: SolverFunction;
@@ -1303,11 +1416,12 @@ async function solveUnifiedCraftMissionPlan(options: {
     lpRelaxation = false,
     targetCraftedOnly = false,
     targetCraftedOnlyKeys,
+    consumptionOptions = [],
     craftSkeleton,
     onSolveMetrics,
     solverFn: solverFnOption,
   } = options;
-  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
+  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) ? new Set([targetKey]) : new Set<string>());
   const solve = solverFnOption ?? await getDefaultSolverFn();
   const {
     itemKeys,
@@ -1315,8 +1429,9 @@ async function solveUnifiedCraftMissionPlan(options: {
     craftModelByItem,
     unmetVarByItem,
     demandByItem,
-  } = craftSkeleton || buildCraftModelSkeleton({ profile, targetKey, quantity, closure });
+  } = craftSkeleton || buildCraftModelSkeleton({ profile, targetKey, quantity, closure, consumptionOptions });
   const missionVars = actions.map((_, index) => `m_${index}`);
+  const consumptionVars = consumptionOptions.map((_, index) => `x_${index}`);
   const normalizedGeRef = Math.max(1, geRef);
   const normalizedFuelRef = Math.max(1, fuelRef);
   const normalizedTimeRef = Math.max(1, timeRef);
@@ -1405,6 +1520,16 @@ async function solveUnifiedCraftMissionPlan(options: {
     const outputModel = craftModelByItem.get(itemKey);
     if (outputModel) {
       terms.push({ coefficient: 1, variable: outputModel.craftVar });
+    }
+    for (let consumptionIndex = 0; consumptionIndex < consumptionOptions.length; consumptionIndex += 1) {
+      const option = consumptionOptions[consumptionIndex];
+      if (option.sourceItemKey === itemKey) {
+        terms.push({ coefficient: -1, variable: consumptionVars[consumptionIndex] });
+      }
+      const yieldQty = option.yields[itemKey] || 0;
+      if (yieldQty > SCORE_EPS) {
+        terms.push({ coefficient: yieldQty, variable: consumptionVars[consumptionIndex] });
+      }
     }
     for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
       const yieldPerMission = actions[actionIndex].yields[itemKey] || 0;
@@ -1613,6 +1738,9 @@ async function solveUnifiedCraftMissionPlan(options: {
   for (const variable of missionVars) {
     lines.push(`  ${variable} >= 0`);
   }
+  for (const variable of consumptionVars) {
+    lines.push(`  ${variable} >= 0`);
+  }
   for (const variable of unmetVarByItem.values()) {
     lines.push(`  ${variable} >= 0`);
   }
@@ -1626,6 +1754,7 @@ async function solveUnifiedCraftMissionPlan(options: {
         ...craftModels.map((model) => model.craftVar),
         ...craftModels.flatMap((model) => model.preDiscountStepVars),
         ...craftModels.flatMap((model) => (model.tailVar ? [model.tailVar] : [])),
+        ...consumptionVars,
         ...missionVars,
       ];
   if (!lpRelaxation) {
@@ -1653,6 +1782,7 @@ async function solveUnifiedCraftMissionPlan(options: {
   );
   const unmetVarCount = itemKeys.length;
   const missionVarCount = missionVars.length;
+  const consumptionVarCount = consumptionVars.length;
   const binaryVarCount = phasedBinaryVars.length;
   const demandConstraintCount = itemKeys.length;
   const craftLinkConstraintCount = craftModels.reduce((sum, model) => {
@@ -1718,6 +1848,15 @@ async function solveUnifiedCraftMissionPlan(options: {
     }
   }
 
+  const consumptions: Record<string, number> = {};
+  for (let index = 0; index < consumptionOptions.length; index += 1) {
+    const rawValue = solution.Columns?.[consumptionVars[index]]?.Primal || 0;
+    const rounded = Math.max(0, Math.round(rawValue));
+    if (rounded > 0) {
+      consumptions[consumptionOptions[index].sourceItemKey] = rounded;
+    }
+  }
+
   const remainingDemand: Record<string, number> = {};
   for (const itemKey of itemKeys) {
     const rawValue = solution.Columns?.[unmetVarByItem.get(itemKey)!]?.Primal || 0;
@@ -1735,6 +1874,7 @@ async function solveUnifiedCraftMissionPlan(options: {
 
   return {
     crafts,
+    consumptions,
     missionCounts,
     remainingDemand,
     geCost,
@@ -1909,6 +2049,7 @@ function craftSkeletonCacheKey(options: {
   closure: Set<string>;
   profile: PlayerProfile;
   targetDemandByItem?: Map<string, number>;
+  consumptionOptions?: ConsumptionOption[];
 }): string {
   const demandKey = options.targetDemandByItem && options.targetDemandByItem.size > 0
     ? Array.from(options.targetDemandByItem.entries())
@@ -1916,10 +2057,17 @@ function craftSkeletonCacheKey(options: {
         .map(([itemKey, qty]) => `${itemKey}:${Math.max(0, Math.round(qty))}`)
         .join("|")
     : `${options.targetKey}:${Math.max(1, Math.round(options.quantity))}`;
+  const consumptionKey = options.consumptionOptions && options.consumptionOptions.length > 0
+    ? options.consumptionOptions
+        .map((option) => `${option.sourceItemKey}:${Object.entries(option.yields).sort(([a], [b]) => a.localeCompare(b)).map(([itemKey, qty]) => `${itemKey}=${qty}`).join(",")}`)
+        .join("|")
+    : "none";
   return [
     `target:${options.targetKey}`,
     `qty:${Math.max(1, Math.round(options.quantity))}`,
     `demand:${demandKey}`,
+    `closure:${closureFingerprint(options.closure)}`,
+    `consume:${consumptionKey}`,
     `counts:${craftCountsFingerprintForClosure(options.profile.craftCounts, options.closure)}`,
   ].join("::");
 }
@@ -1930,6 +2078,7 @@ function getCraftSkeletonCached(options: {
   quantity: number;
   closure: Set<string>;
   targetDemandByItem?: Map<string, number>;
+  consumptionOptions?: ConsumptionOption[];
 }): CraftModelSkeleton {
   const key = craftSkeletonCacheKey(options);
   const cached = craftSkeletonCache.get(key);
@@ -2028,6 +2177,34 @@ function durationTypeSortRank(durationType: DurationType): number {
   }
 }
 
+function buildAvailableCombosFromActions(
+  primaryActions: MissionAction[],
+  additionalActions: MissionAction[] = []
+): AvailableCombo[] {
+  const comboSet = new Set<string>();
+  const availableCombos: AvailableCombo[] = [];
+  const addActionCombo = (action: MissionAction) => {
+    const comboKey = `${action.ship}|${action.durationType}|${action.targetAfxId}`;
+    if (comboSet.has(comboKey)) {
+      return;
+    }
+    comboSet.add(comboKey);
+    availableCombos.push({
+      ship: action.ship,
+      durationType: action.durationType,
+      targetAfxId: action.targetAfxId,
+    });
+  };
+
+  for (const action of primaryActions) {
+    addActionCombo(action);
+  }
+  for (const action of additionalActions) {
+    addActionCombo(action);
+  }
+  return availableCombos;
+}
+
 function buildMissionRows(actions: MissionAction[], missionCounts: Record<string, number>): PlanMissionRow[] {
   const actionByKey = new Map(actions.map((action) => [action.key, action]));
   return Object.entries(missionCounts)
@@ -2078,6 +2255,30 @@ function buildCraftRows(crafts: Record<string, number>): PlanCraftRow[] {
   return Object.entries(crafts)
     .map(([itemKey, count]) => ({ itemId: itemKeyToId(itemKey), count }))
     .sort((a, b) => b.count - a.count);
+}
+
+function buildConsumptionRows(
+  consumptions: Record<string, number>,
+  consumptionOptions: ConsumptionOption[]
+): PlanConsumptionRow[] {
+  const optionBySource = new Map(consumptionOptions.map((option) => [option.sourceItemKey, option]));
+  return Object.entries(consumptions)
+    .filter(([, count]) => count > 0)
+    .map(([sourceItemKey, countRaw]) => {
+      const count = Math.max(0, Math.round(countRaw));
+      const option = optionBySource.get(sourceItemKey);
+      const yields = option
+        ? Object.entries(option.yields)
+            .map(([itemKey, perConsume]) => ({
+              itemId: itemKeyToId(itemKey),
+              quantity: count * Math.max(0, perConsume),
+            }))
+            .filter((row) => row.quantity > SCORE_EPS)
+            .sort((a, b) => b.quantity - a.quantity || a.itemId.localeCompare(b.itemId))
+        : [];
+      return { itemId: itemKeyToId(sourceItemKey), count, yields };
+    })
+    .sort((a, b) => b.count - a.count || a.itemId.localeCompare(b.itemId));
 }
 
 function expectedTargetFromMissions(
@@ -2183,6 +2384,8 @@ function computeRemainingDemandForPlan(options: {
   quantity: number;
   closure: Set<string>;
   crafts: Record<string, number>;
+  consumptions?: Record<string, number>;
+  consumptionOptions?: ConsumptionOption[];
   actions: MissionAction[];
   missionCounts: Record<string, number>;
   targetCraftedOnly?: boolean;
@@ -2195,6 +2398,8 @@ function computeRemainingDemandForPlan(options: {
     quantity,
     closure,
     crafts,
+    consumptions = {},
+    consumptionOptions = [],
     actions,
     missionCounts,
     targetCraftedOnly = false,
@@ -2202,7 +2407,7 @@ function computeRemainingDemandForPlan(options: {
   const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
     ? options.targetDemandByItem
     : new Map([[targetKey, Math.max(0, Math.round(quantity))]]);
-  const targetCraftedOnlyKeys = options.targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
+  const targetCraftedOnlyKeys = options.targetCraftedOnlyKeys || (targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) ? new Set([targetKey]) : new Set<string>());
   const actionByKey = new Map(actions.map((action) => [action.key, action]));
   const remaining: Record<string, number> = {};
 
@@ -2210,6 +2415,7 @@ function computeRemainingDemandForPlan(options: {
     const demandQty = Math.max(0, Math.round(targetDemandByItem.get(itemKey) || 0));
     const inventoryQty = demandQty > 0 ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
+    const consumptionOutput = consumptionProducedByItem(itemKey, consumptions, consumptionOptions);
     let missionOutput = 0;
     if (!targetCraftedOnlyKeys.has(itemKey)) {
       for (const [actionKey, launchesRaw] of Object.entries(missionCounts)) {
@@ -2237,7 +2443,7 @@ function computeRemainingDemandForPlan(options: {
 
     remaining[itemKey] = Math.max(
       0,
-      demandQty - inventoryQty - craftOutput - missionOutput + ingredientConsumption
+      demandQty - inventoryQty - craftOutput - consumptionOutput - missionOutput + ingredientConsumption + Math.max(0, Math.round(consumptions[itemKey] || 0))
     );
   }
 
@@ -2250,9 +2456,11 @@ function computePreMissionDemandForPlan(options: {
   quantity: number;
   closure: Set<string>;
   crafts: Record<string, number>;
+  consumptions?: Record<string, number>;
+  consumptionOptions?: ConsumptionOption[];
   targetDemandByItem?: Map<string, number>;
 }): Record<string, number> {
-  const { profile, targetKey, quantity, closure, crafts } = options;
+  const { profile, targetKey, quantity, closure, crafts, consumptions = {}, consumptionOptions = [] } = options;
   const targetDemandByItem = options.targetDemandByItem && options.targetDemandByItem.size > 0
     ? options.targetDemandByItem
     : new Map([[targetKey, Math.max(0, Math.round(quantity))]]);
@@ -2261,6 +2469,7 @@ function computePreMissionDemandForPlan(options: {
     const demandQty = Math.max(0, Math.round(targetDemandByItem.get(itemKey) || 0));
     const inventoryQty = demandQty > 0 ? 0 : Math.max(0, profile.inventory[itemKey] || 0);
     const craftOutput = Math.max(0, Math.round(crafts[itemKey] || 0));
+    const consumptionOutput = consumptionProducedByItem(itemKey, consumptions, consumptionOptions);
     let ingredientConsumption = 0;
     for (const [craftedItemKey, craftCountRaw] of Object.entries(crafts)) {
       const craftCount = Math.max(0, Math.round(craftCountRaw));
@@ -2273,7 +2482,10 @@ function computePreMissionDemandForPlan(options: {
         ingredientConsumption += ingredientQty * craftCount;
       }
     }
-    remaining[itemKey] = Math.max(0, demandQty - inventoryQty - craftOutput + ingredientConsumption);
+    remaining[itemKey] = Math.max(
+      0,
+      demandQty - inventoryQty - craftOutput - consumptionOutput + ingredientConsumption + Math.max(0, Math.round(consumptions[itemKey] || 0))
+    );
   }
   return remaining;
 }
@@ -2295,7 +2507,7 @@ function applyMissionYieldToDemand(
     return { ...demand };
   }
   const next: Record<string, number> = { ...demand };
-  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly ? new Set([targetKey]) : new Set<string>());
+  const effectiveTargetCraftedOnlyKeys = targetCraftedOnlyKeys || (targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) ? new Set([targetKey]) : new Set<string>());
   for (const [itemKey, yieldPerMission] of Object.entries(action.yields)) {
     if (effectiveTargetCraftedOnlyKeys.has(itemKey)) {
       continue;
@@ -2407,6 +2619,7 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
   targetCraftedOnly?: boolean;
   targetDemandByItem?: Map<string, number>;
   targetCraftedOnlyKeys?: Set<string>;
+  consumptionOptions?: ConsumptionOption[];
 }): { unified: UnifiedPlan; totalSlotSeconds: number; repeatFactor: number; unmetTotal: number } {
   const {
     profile,
@@ -2428,6 +2641,13 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
       crafts[itemKey] = count * repeatFactor;
     }
   }
+  const consumptions: Record<string, number> = {};
+  for (const [itemKey, countRaw] of Object.entries(unified.consumptions)) {
+    const count = Math.max(0, Math.round(countRaw));
+    if (count > 0) {
+      consumptions[itemKey] = count * repeatFactor;
+    }
+  }
   const missionCounts = scaleMissionCountsForRepeatedBlock({
     actions,
     missionCounts: unified.missionCounts,
@@ -2440,6 +2660,8 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
     quantity: requestedQuantity,
     closure,
     crafts,
+    consumptions,
+    consumptionOptions: options.consumptionOptions,
     actions,
     missionCounts,
     targetCraftedOnly,
@@ -2455,6 +2677,7 @@ function scaleUnifiedPlanForRequestedQuantity(options: {
   return {
     unified: {
       crafts,
+      consumptions,
       missionCounts,
       remainingDemand,
       geCost,
@@ -2478,6 +2701,7 @@ async function refineScaledPlanWithProgression(options: {
   targetCraftedOnly?: boolean;
   targetDemandByItem?: Map<string, number>;
   targetCraftedOnlyKeys?: Set<string>;
+  consumptionOptions?: ConsumptionOption[];
   lootData: LootJson;
   missionDropRarities: ShinyRaritySelection;
 }): Promise<{ actions: MissionAction[]; unified: UnifiedPlan; prunedLaunches: number }> {
@@ -2518,6 +2742,8 @@ async function refineScaledPlanWithProgression(options: {
     quantity: requestedQuantity,
     closure,
     crafts: unified.crafts,
+    consumptions: unified.consumptions,
+    consumptionOptions: options.consumptionOptions,
     targetDemandByItem: options.targetDemandByItem,
   });
   const launchCounts = shipLevelsToLaunchCounts(profile.shipLevels);
@@ -2623,6 +2849,8 @@ async function refineScaledPlanWithProgression(options: {
     quantity: requestedQuantity,
     closure,
     crafts: unified.crafts,
+    consumptions: unified.consumptions,
+    consumptionOptions: options.consumptionOptions,
     actions: Array.from(refinedActionByKey.values()),
     missionCounts: refinedMissionCounts,
     targetCraftedOnly,
@@ -2657,6 +2885,7 @@ async function repairScaledPlanRemainingDemand(options: {
   targetCraftedOnly?: boolean;
   targetDemandByItem?: Map<string, number>;
   targetCraftedOnlyKeys?: Set<string>;
+  consumptionOptions?: ConsumptionOption[];
   solverFn?: SolverFunction;
 }): Promise<{ unified: UnifiedPlan; repairedLaunches: number; notes: string[] }> {
   const {
@@ -2675,7 +2904,7 @@ async function repairScaledPlanRemainingDemand(options: {
     if (qty <= 1e-6) {
       continue;
     }
-    if (targetCraftedOnly && itemKey === targetKey) {
+    if (targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) && itemKey === targetKey) {
       continue;
     }
     repairDemand[itemKey] = qty;
@@ -2725,6 +2954,8 @@ async function repairScaledPlanRemainingDemand(options: {
     quantity: requestedQuantity,
     closure,
     crafts: unified.crafts,
+    consumptions: unified.consumptions,
+    consumptionOptions: options.consumptionOptions,
     actions,
     missionCounts: repairedMissionCounts,
     targetCraftedOnly,
@@ -2765,7 +2996,8 @@ function buildTargetBreakdown(options: {
   const shortfall = Math.max(0, remainingDemand[targetKey] || 0);
   const fulfilled = Math.max(0, requested - shortfall);
   const rawCraft = Math.max(0, crafts[targetKey] || 0);
-  const rawMissionExpected = targetCraftedOnly ? 0 : expectedTargetFromMissions(targetKey, actions, missionCounts);
+  const effectiveTargetCraftedOnly = targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey);
+  const rawMissionExpected = effectiveTargetCraftedOnly ? 0 : expectedTargetFromMissions(targetKey, actions, missionCounts);
 
   const fromCraft = Math.min(fulfilled, rawCraft);
   const remainingAfterCraft = Math.max(0, fulfilled - fromCraft);
@@ -3675,7 +3907,7 @@ function normalizePlannerTargets(targetItemId: string, quantity: number, targets
     primaryQuantity,
     targets: normalizedTargets,
     targetDemandByItem,
-    targetCraftedOnlyKeys: new Set(targetDemandByItem.keys()),
+    targetCraftedOnlyKeys: new Set(Array.from(targetDemandByItem.keys()).filter(isCraftedOnlyEligibleGoalKey)),
   };
 }
 
@@ -3757,7 +3989,7 @@ async function planForTargetHeuristic(
         ? normalizedScore(0, farmTpu, effectivePriorityTime, geRef, timeRef)
         : Number.POSITIVE_INFINITY;
 
-      const chooseFarm = !(targetCraftedOnly && itemKey === targetKey && depth === 0) && farmScore + SCORE_EPS < craftScore;
+      const chooseFarm = !(targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) && itemKey === targetKey && depth === 0) && farmScore + SCORE_EPS < craftScore;
       if (chooseFarm) {
         demand[itemKey] = (demand[itemKey] || 0) + 1;
         remaining -= 1;
@@ -3860,7 +4092,7 @@ async function planForTargetHeuristic(
   );
   notes.push("Target quantity is interpreted as additional copies beyond current inventory.");
   if (targetCraftedOnly) {
-    notes.push("Only crafted target mode enabled: mission drops of the target item do not count toward the requested quantity.");
+    notes.push("Artifacts-only crafted goal mode enabled: mission drops do not count toward shiny-capable artifact goals, but still count toward stones and ingredient goals.");
   }
   notes.push(missionDropRarityNote(missionDropRarities));
   notes.push(
@@ -3879,6 +4111,7 @@ async function planForTargetHeuristic(
     expectedHours,
     weightedScore,
     crafts: craftRows,
+    consumptions: [],
     missions: missionRows,
     unmetItems,
     targetBreakdown,
@@ -3914,6 +4147,7 @@ export async function planForTarget(
   const fastMode = Boolean(plannerOptions.fastMode);
   const missionDropRarities = normalizeShinyRaritySelection(plannerOptions.missionDropRarities);
   const targetCraftedOnly = Boolean(plannerOptions.targetCraftedOnly);
+  const selectedConsumptionItemKeys = normalizeConsumptionItemKeys(plannerOptions.selectedConsumptionItemIds);
   const multiTargetScaleFactor = multiTarget ? targetDemandGcd(normalizedTargets.targetDemandByItem) : 1;
   const singleTargetFastQuantityAcceleration =
     fastMode &&
@@ -4014,6 +4248,7 @@ export async function planForTarget(
         minimumTimePriority: objectiveContext.minimumTimePriority,
         targetCraftedOnly,
         missionDropRarities,
+        selectedConsumptionItemIds: Array.from(selectedConsumptionItemKeys).map((itemKey) => itemKeyToId(itemKey)),
         allowedShipDurations: plannerOptions.allowedShipDurations,
         solverFn,
         lootData: injectedLootData,
@@ -4081,6 +4316,7 @@ export async function planForTarget(
       closure.add(itemKey);
     }
   }
+  const consumptionOptions = buildConsumptionOptionsForClosure(selectedConsumptionItemKeys, closure);
   const closureKey = closureFingerprint(closure);
   const representativeBlockProfile = profile;
 
@@ -4107,6 +4343,7 @@ export async function planForTarget(
     `qty:${solveQuantity}`,
     `rar:${missionDropRarityKey}`,
     `craftedOnly:${targetCraftedOnly ? 1 : 0}`,
+    `consume:${consumptionOptions.map((option) => option.sourceItemKey).join(",") || "none"}`,
     `mode:${objectiveMode}:${priorityTime <= SCORE_EPS ? "ge" : "mix"}:${objectiveContext.minimumTimePriority}`,
     `fast:${fastMode ? 1 : 0}`,
   ].join("::");
@@ -4159,6 +4396,7 @@ export async function planForTarget(
     quantity: solveQuantity,
     closure,
     targetDemandByItem: solveTargetDemandByItem,
+    consumptionOptions,
   });
 
   const { geRef, fuelRef, timeRef } = computeObjectiveReferences({
@@ -4378,6 +4616,7 @@ export async function planForTarget(
         strictGeObjective: geOnlyCandidateMilp,
         targetCraftedOnly,
         targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+        consumptionOptions,
         craftSkeleton,
         solverFn,
         onSolveMetrics: (metrics) => {
@@ -4414,6 +4653,7 @@ export async function planForTarget(
             lpRelaxation: false,
             targetCraftedOnly,
             targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+            consumptionOptions,
             craftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4744,6 +4984,7 @@ export async function planForTarget(
         phasedChainConstraints,
         targetCraftedOnly,
         targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+        consumptionOptions,
         craftSkeleton: fullQuantityCraftSkeleton,
         solverFn,
         onSolveMetrics: (metrics) => {
@@ -4756,6 +4997,8 @@ export async function planForTarget(
         quantity: quantityInt,
         closure,
         crafts: unified.crafts,
+        consumptions: unified.consumptions,
+        consumptionOptions,
         actions: comboActions,
         missionCounts: unified.missionCounts,
         targetCraftedOnly,
@@ -4811,6 +5054,7 @@ export async function planForTarget(
         quantity: blockQuantity,
         closure,
         targetDemandByItem: new Map([[targetKey, blockQuantity]]),
+        consumptionOptions,
       });
       const blockRefs = computeObjectiveReferences({
         profile: blockProfile,
@@ -4865,7 +5109,8 @@ export async function planForTarget(
             phasedChainConstraints: input.phasedChainConstraints,
             lpRelaxation: true,
             targetCraftedOnly,
-            targetCraftedOnlyKeys: targetCraftedOnly ? new Set([targetKey]) : undefined,
+            targetCraftedOnlyKeys: targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) ? new Set([targetKey]) : undefined,
+            consumptionOptions,
             craftSkeleton: blockCraftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4925,7 +5170,8 @@ export async function planForTarget(
             phasedChainConstraints: screened.input.phasedChainConstraints,
             lpRelaxation: false,
             targetCraftedOnly,
-            targetCraftedOnlyKeys: targetCraftedOnly ? new Set([targetKey]) : undefined,
+            targetCraftedOnlyKeys: targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) ? new Set([targetKey]) : undefined,
+            consumptionOptions,
             craftSkeleton: blockCraftSkeleton,
             solverFn,
             onSolveMetrics: (metrics) => {
@@ -4944,6 +5190,7 @@ export async function planForTarget(
             prepSteps: screened.input.candidate.prepSteps,
             prepNoYieldSlotSeconds: screened.input.prepNoYieldSlotSeconds,
             targetCraftedOnly,
+            consumptionOptions,
           });
           const refined = await refineScaledPlanWithProgression({
             profile,
@@ -4954,6 +5201,7 @@ export async function planForTarget(
             unified: scaled.unified,
             prepSteps: screened.input.candidate.prepSteps,
             targetCraftedOnly,
+            consumptionOptions,
             lootData,
             missionDropRarities,
           });
@@ -5335,6 +5583,7 @@ export async function planForTarget(
               lpRelaxation: false,
               targetCraftedOnly,
               targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+              consumptionOptions,
               craftSkeleton,
               solverFn,
               onSolveMetrics: (metrics) => {
@@ -5459,6 +5708,7 @@ export async function planForTarget(
         targetCraftedOnly,
         targetDemandByItem: normalizedTargets.targetDemandByItem,
         targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+        consumptionOptions,
         lootData,
         missionDropRarities,
       });
@@ -5478,6 +5728,7 @@ export async function planForTarget(
           targetCraftedOnly,
           targetDemandByItem: normalizedTargets.targetDemandByItem,
           targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+          consumptionOptions,
           solverFn,
         });
         outputUnified = repaired.unified;
@@ -5528,6 +5779,7 @@ export async function planForTarget(
       }
     }
 
+    const comparisonAvailableActions = outputActions;
     if (outputUnmetTotal <= 1e-6) {
       const monolithicCombos = chosenCombosForPlan(outputActions, outputUnified.missionCounts);
       if (monolithicCombos.length > 0) {
@@ -5537,6 +5789,7 @@ export async function planForTarget(
           quantity: quantityInt,
           closure,
           targetDemandByItem: normalizedTargets.targetDemandByItem,
+          consumptionOptions,
         });
         let testedMonolithicCount = 0;
         let adoptedMonolithicCombo: AvailableCombo | null = null;
@@ -5599,6 +5852,7 @@ export async function planForTarget(
 
     const missionRows = buildMissionRows(outputActions, outputUnified.missionCounts);
     const craftRows = buildCraftRows(outputUnified.crafts);
+    const consumptionRows = buildConsumptionRows(outputUnified.consumptions, consumptionOptions);
     const targetBreakdown = buildTargetBreakdown({
       quantity: quantityInt,
       targetKey,
@@ -5735,7 +5989,10 @@ export async function planForTarget(
     );
     notes.push("Target quantity is interpreted as additional copies beyond current inventory.");
     if (targetCraftedOnly) {
-      notes.push("Only crafted target mode enabled: mission drops of the target item do not count toward the requested quantity.");
+      notes.push("Artifacts-only crafted goal mode enabled: mission drops do not count toward shiny-capable artifact goals, but still count toward stones and ingredient goals.");
+    }
+    if (consumptionRows.length > 0) {
+      notes.push("Selected artifact consumption sources are modeled as optional expected stone yields; shiny consumption uses common-yield data.");
     }
     notes.push(
       "Prep launches are credited with expected drops for required items when compatible mission-target coverage exists."
@@ -5768,20 +6025,7 @@ export async function planForTarget(
     });
     const outputFuelCost = missionFuelCost(outputActions, outputUnified.missionCounts);
 
-    // Build available combos from the selected candidate's actions
-    const comboSet = new Set<string>();
-    const availableCombos: AvailableCombo[] = [];
-    for (const action of outputActions) {
-      const comboKey = `${action.ship}|${action.durationType}|${action.targetAfxId}`;
-      if (!comboSet.has(comboKey)) {
-        comboSet.add(comboKey);
-        availableCombos.push({
-          ship: action.ship,
-          durationType: action.durationType as DurationType,
-          targetAfxId: action.targetAfxId,
-        });
-      }
-    }
+    const availableCombos = buildAvailableCombosFromActions(comparisonAvailableActions, outputActions);
 
     const result: PlannerResult = {
       targetItemId: itemKeyToId(targetKey),
@@ -5795,6 +6039,7 @@ export async function planForTarget(
       expectedHours,
       weightedScore: outputWeightedScore,
       crafts: craftRows,
+      consumptions: consumptionRows,
       missions: missionRows,
       unmetItems,
       targetBreakdown,
@@ -5899,20 +6144,40 @@ export type MonolithicPathResult = {
 export async function computeMonolithicPaths(options: {
   profile: PlayerProfile;
   targetItemId: string;
+  targets?: PlannerTarget[];
   quantity: number;
   priorityTime: number;
   selectedCombos: Array<{ ship: string; durationType: DurationType; targetAfxId: number }>;
   missionDropRarities?: Partial<ShinyRaritySelection>;
   targetCraftedOnly?: boolean;
+  selectedConsumptionItemIds?: string[];
   solverFn?: SolverFunction;
   lootData?: LootJson;
 }): Promise<MonolithicPathResult[]> {
-  const { profile, targetItemId, quantity, priorityTime, selectedCombos, missionDropRarities, targetCraftedOnly = false, solverFn: solverFnOption, lootData: injectedLootData } = options;
-  const targetKey = itemIdToCanonicalKey(targetItemId);
-  const quantityInt = Math.max(1, Math.round(quantity));
+  const {
+    profile,
+    targetItemId,
+    targets,
+    quantity,
+    priorityTime,
+    selectedCombos,
+    missionDropRarities,
+    targetCraftedOnly = false,
+    selectedConsumptionItemIds,
+    solverFn: solverFnOption,
+    lootData: injectedLootData,
+  } = options;
+  const normalizedTargets = normalizePlannerTargets(targetItemId, quantity, targets);
+  const targetKey = normalizedTargets.primaryTargetKey;
+  const quantityInt = normalizedTargets.primaryQuantity;
   const missionDropRaritySelection = normalizeShinyRaritySelection(missionDropRarities);
+  const selectedConsumptionItemKeys = normalizeConsumptionItemKeys(selectedConsumptionItemIds);
 
-  const closure = getTargetClosureCached(targetKey);
+  const closure = new Set(getTargetClosureCached(targetKey));
+  for (const itemKey of normalizedTargets.targetDemandByItem.keys()) {
+    collectClosure(itemKey, closure);
+  }
+  const consumptionOptions = buildConsumptionOptionsForClosure(selectedConsumptionItemKeys, closure);
   const closureKey = closureFingerprint(closure);
 
   const lootData = injectedLootData ?? await getDefaultLootData();
@@ -5926,6 +6191,8 @@ export async function computeMonolithicPaths(options: {
     targetKey,
     quantity: quantityInt,
     closure,
+    targetDemandByItem: normalizedTargets.targetDemandByItem,
+    consumptionOptions,
   });
 
   const results: MonolithicPathResult[] = [];
@@ -6008,6 +6275,8 @@ export async function computeMonolithicPaths(options: {
         maxMissionLaunchesByOption,
         phasedChainConstraints,
         targetCraftedOnly,
+        targetCraftedOnlyKeys: targetCraftedOnly ? normalizedTargets.targetCraftedOnlyKeys : undefined,
+        consumptionOptions,
         craftSkeleton,
         solverFn: solverFnOption,
       });
@@ -6040,7 +6309,7 @@ export async function computeMonolithicPaths(options: {
         for (const [actionKey, launches] of Object.entries(unified.missionCounts)) {
           const action = filteredActions.find((a) => a.key === actionKey);
           if (action) {
-            if (!(targetCraftedOnly && itemKey === targetKey)) {
+            if (!(targetCraftedOnly && isCraftedOnlyEligibleGoalKey(targetKey) && itemKey === targetKey)) {
               fromMissionsExpected += (action.yields[itemKey] || 0) * launches;
             }
           }

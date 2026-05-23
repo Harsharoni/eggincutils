@@ -32,6 +32,7 @@ const solveInputSnapshotSchema = z.object({
     allowedShipDurations: z
       .array(z.object({ ship: z.string().min(1), durationType: z.enum(["SHORT", "LONG", "EPIC"]) }))
       .optional(),
+    selectedConsumptionItemIds: z.array(z.string().min(1)).optional(),
   }),
   sourceFilters: z.object({
     inventorySource: z.enum(["main", "virtue"]).optional().default("main"),
@@ -790,6 +791,7 @@ async function run(options: CliOptions): Promise<RunDiagnostics> {
         legendary: loaded.snapshot.sourceFilters.includeDropLegendary,
       },
       allowedShipDurations: loaded.snapshot.request.allowedShipDurations,
+      selectedConsumptionItemIds: loaded.snapshot.request.selectedConsumptionItemIds,
       targetCraftedOnly: loaded.snapshot.request.targetCraftedOnly,
       onProgress: (event) => {
         progressEvents.push(event);

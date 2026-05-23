@@ -5,12 +5,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import artifactDisplay from "../../data/artifact-display.json";
+import artifactConsumption from "../../data/artifact-consumption.json";
+import artifactShortNames from "../../data/artifact-short-names.json";
 import recipes from "../../data/recipes.json";
 import { MISSION_CRAFT_COPY } from "../../lib/mission-craft-copy";
 import {
   afxIdToDisplayName,
   afxIdToItemKey,
   afxIdToTargetFamilyName,
+  itemIdToCanonicalKey,
   itemIdToKey,
   itemKeyToDisplayName,
   itemKeyToIconUrl,
@@ -107,6 +110,11 @@ type PlanResponse = {
     expectedHours: number;
     weightedScore: number;
     crafts: Array<{ itemId: string; count: number }>;
+    consumptions: Array<{
+      itemId: string;
+      count: number;
+      yields: Array<{ itemId: string; quantity: number }>;
+    }>;
     missions: Array<{
       missionId: string;
       ship: string;
@@ -182,6 +190,7 @@ type SolveSnapshotRequest = {
   priorityTime: number;
   fastMode: boolean;
   allowedShipDurations?: Array<{ ship: string; durationType: "SHORT" | "LONG" | "EPIC" }>;
+  selectedConsumptionItemIds?: string[];
 };
 
 type LastSolveInputs = SolveSnapshotRequest & {
@@ -268,9 +277,13 @@ type CraftPlanDetailRow = {
   have: number | null;
   requiredForChain: number;
   expectedMission: number;
+  fromConsumption: number;
+  consumedCount: number;
   plannedCraftTooltip: string | null;
   neededTooltip: string | null;
   expectedMissionTooltip: string | null;
+  fromConsumptionTooltip: string | null;
+  consumedTooltip: string | null;
 };
 
 type TargetOption = {
@@ -366,14 +379,42 @@ type PlannerSourcePreferences = {
   includeDropEpic?: boolean;
   includeDropLegendary?: boolean;
   includeDropFragments?: boolean;
+  selectedConsumptionItemIds?: string[];
   shipDurations?: ShipDurationSelection;
 };
 
 type PlannerSourcePreferenceStore = Partial<Record<InventorySource, PlannerSourcePreferences>>;
 
 const ARTIFACT_DISPLAY = artifactDisplay as Record<string, { id: string; name: string; tierName: string; tierNumber: number }>;
+const ARTIFACT_CONSUMPTION = artifactConsumption as Record<string, Record<string, number>>;
+const ARTIFACT_SHORT_NAMES = artifactShortNames as Array<{ familyKey: string; shortName: string }>;
 const SHARED_EID_KEYS = [LOCAL_PREF_KEYS.sharedEid, LOCAL_PREF_KEYS.legacyEid] as const;
 const SHARED_INCLUDE_SLOTTED_KEYS = [LOCAL_PREF_KEYS.sharedIncludeSlotted, LOCAL_PREF_KEYS.legacyIncludeSlotted] as const;
+
+function buildDefaultConsumptionItemIds(): string[] {
+  return ARTIFACT_SHORT_NAMES.flatMap((entry) => [1, 2, 3, 4].map((tier) => `${entry.familyKey}_${tier}`))
+    .filter((itemKey) => ARTIFACT_DISPLAY[itemKey] && Object.keys(ARTIFACT_CONSUMPTION[itemKey] || {}).length > 0)
+    .map((itemKey) => ARTIFACT_DISPLAY[itemKey]?.id || itemKeyToId(itemKey))
+    .sort((a, b) => itemIdToKey(a).localeCompare(itemIdToKey(b)));
+}
+
+const DEFAULT_CONSUMPTION_ITEM_IDS = buildDefaultConsumptionItemIds();
+const DEFAULT_CONSUMPTION_ITEM_ID_SET = new Set(DEFAULT_CONSUMPTION_ITEM_IDS);
+const DISPLAY_ID_MISMATCH_CONSUMPTION_IDS = DEFAULT_CONSUMPTION_ITEM_IDS.filter((itemId) => {
+  const canonicalKey = itemIdToCanonicalKey(itemId);
+  return itemKeyToId(canonicalKey) !== itemId;
+});
+
+function isCraftedOnlyEligibleGoalKey(itemKey: string): boolean {
+  if (/_stone_\d+$/.test(itemKey)) {
+    return false;
+  }
+  return !(
+    /^gold_meteorite_\d+$/.test(itemKey) ||
+    /^tau_ceti_geode_\d+$/.test(itemKey) ||
+    /^solar_titanium_\d+$/.test(itemKey)
+  );
+}
 
 function durationTypeLabel(durationType: string): string {
   switch (durationType) {
@@ -1181,6 +1222,40 @@ function normalizeShipDurations(value: unknown): ShipDurationSelection | null {
   return merged;
 }
 
+function normalizeConsumptionSelection(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const canonicalKey = itemIdToCanonicalKey(raw);
+    if (!ARTIFACT_CONSUMPTION[canonicalKey]) {
+      continue;
+    }
+    const itemId = ARTIFACT_DISPLAY[canonicalKey]?.id || itemKeyToId(canonicalKey);
+    if (!DEFAULT_CONSUMPTION_ITEM_ID_SET.has(itemId) || seen.has(itemId)) {
+      continue;
+    }
+    seen.add(itemId);
+    selected.push(itemId);
+  }
+  const selectedSet = new Set(selected);
+  const nonMismatchDefaults = DEFAULT_CONSUMPTION_ITEM_IDS.filter(
+    (itemId) => !DISPLAY_ID_MISMATCH_CONSUMPTION_IDS.includes(itemId)
+  );
+  const looksLikeAllSelectedBeforeDisplayIdRepair =
+    selected.length === nonMismatchDefaults.length &&
+    nonMismatchDefaults.every((itemId) => selectedSet.has(itemId));
+  if (looksLikeAllSelectedBeforeDisplayIdRepair) {
+    return DEFAULT_CONSUMPTION_ITEM_IDS;
+  }
+  return selected;
+}
+
 function readPlannerSourcePreferenceStore(): PlannerSourcePreferenceStore {
   const raw = readFirstStoredString([LOCAL_PREF_KEYS.plannerSourcePreferences]);
   if (!raw) {
@@ -1377,6 +1452,8 @@ export default function MissionCraftPlannerPage() {
   const [lastSolveRequest, setLastSolveRequest] = useState<LastSolveInputs | null>(null);
   const [shipDurations, setShipDurations] = useState<ShipDurationSelection>(buildDefaultShipDurations);
   const [shipSelectorOpen, setShipSelectorOpen] = useState(false);
+  const [consumptionDrawerOpen, setConsumptionDrawerOpen] = useState(false);
+  const [selectedConsumptionItemIds, setSelectedConsumptionItemIds] = useState<string[]>(DEFAULT_CONSUMPTION_ITEM_IDS);
   const [lootData, setLootData] = useState<LootJson | null>(null);
   const lootDataRef = useRef<LootJson | null>(null);
   const targetPickerRef = useRef<HTMLDivElement | null>(null);
@@ -1418,6 +1495,7 @@ export default function MissionCraftPlannerPage() {
     includeDropEpic,
     includeDropLegendary,
     includeDropFragments,
+    selectedConsumptionItemIds,
     shipDurations,
   });
 
@@ -1443,6 +1521,11 @@ export default function MissionCraftPlannerPage() {
     setIncludeDropEpic(Boolean(preferences?.includeDropEpic));
     setIncludeDropLegendary(Boolean(preferences?.includeDropLegendary));
     setIncludeDropFragments(preferences?.includeDropFragments !== false);
+    setSelectedConsumptionItemIds(
+      preferences && Object.prototype.hasOwnProperty.call(preferences, "selectedConsumptionItemIds")
+        ? normalizeConsumptionSelection(preferences.selectedConsumptionItemIds)
+        : DEFAULT_CONSUMPTION_ITEM_IDS
+    );
     setShipDurations(normalizeShipDurations(preferences?.shipDurations) || buildDefaultShipDurations());
   };
 
@@ -1536,6 +1619,41 @@ export default function MissionCraftPlannerPage() {
         return a.label.localeCompare(b.label);
       });
   }, []);
+  const consumptionFamilies = useMemo(
+    () =>
+      ARTIFACT_SHORT_NAMES.map((entry) => {
+        const tiers = [1, 2, 3, 4]
+          .map((tier) => {
+            const itemKey = `${entry.familyKey}_${tier}`;
+            const displayInfo = ARTIFACT_DISPLAY[itemKey];
+            if (!displayInfo) {
+              return null;
+            }
+            const yields = ARTIFACT_CONSUMPTION[itemKey] || {};
+            return {
+              itemKey,
+              itemId: displayInfo.id || itemKeyToId(itemKey),
+              tier,
+              label: `${displayInfo.name} (T${tier})`,
+              iconUrl: itemKeyToIconUrl(itemKey, 32),
+              hasYield: Object.keys(yields).length > 0,
+            };
+          })
+          .filter((tier): tier is NonNullable<typeof tier> => tier !== null);
+        return { ...entry, tiers };
+      }),
+    []
+  );
+  const selectedConsumptionSet = useMemo(() => new Set(selectedConsumptionItemIds), [selectedConsumptionItemIds]);
+  const allConsumptionItemIds = useMemo(
+    () =>
+      consumptionFamilies
+        .flatMap((family) => family.tiers)
+        .filter((tier) => tier.hasYield)
+        .map((tier) => tier.itemId)
+        .sort((a, b) => itemIdToKey(a).localeCompare(itemIdToKey(b))),
+    [consumptionFamilies]
+  );
   const activeTargetRow = useMemo(
     () => targetRows.find((row) => row.id === activeTargetRowId) || targetRows[0] || null,
     [activeTargetRowId, targetRows]
@@ -1615,6 +1733,32 @@ export default function MissionCraftPlannerPage() {
       }
     }
 
+    const consumedCountByItemId = new Map<string, number>();
+    const consumptionYieldByItemId = new Map<string, number>();
+    const consumptionYieldBreakdownByItemId = new Map<
+      string,
+      Array<{ sourceItemId: string; sourceCount: number; quantity: number }>
+    >();
+    for (const consumption of response.plan.consumptions || []) {
+      consumedCountByItemId.set(
+        consumption.itemId,
+        (consumedCountByItemId.get(consumption.itemId) || 0) + Math.max(0, consumption.count)
+      );
+      for (const yieldRow of consumption.yields) {
+        consumptionYieldByItemId.set(
+          yieldRow.itemId,
+          (consumptionYieldByItemId.get(yieldRow.itemId) || 0) + yieldRow.quantity
+        );
+        const existing = consumptionYieldBreakdownByItemId.get(yieldRow.itemId) || [];
+        existing.push({
+          sourceItemId: consumption.itemId,
+          sourceCount: consumption.count,
+          quantity: yieldRow.quantity,
+        });
+        consumptionYieldBreakdownByItemId.set(yieldRow.itemId, existing);
+      }
+    }
+
     const neededUsesByItemKey = new Map<string, Map<string, number>>();
     const addNeededUse = (itemKey: string, consumerKey: string, quantity: number): void => {
       const safeQty = Math.max(0, quantity);
@@ -1647,6 +1791,10 @@ export default function MissionCraftPlannerPage() {
     const rowItemKeys = new Set<string>([
       ...Object.keys(requiredByItemKey),
       ...response.plan.crafts.map((craft) => itemIdToKey(craft.itemId)),
+      ...(response.plan.consumptions || []).flatMap((consumption) => [
+        itemIdToKey(consumption.itemId),
+        ...consumption.yields.map((yieldRow) => itemIdToKey(yieldRow.itemId)),
+      ]),
     ]);
 
     const rows = Array.from(rowItemKeys)
@@ -1655,12 +1803,16 @@ export default function MissionCraftPlannerPage() {
         const requiredForChain = Math.max(0, requiredQty);
         const itemId = itemKeyToId(itemKey);
         const plannedCraftCount = plannedCraftCountByItemId.get(itemId) || 0;
-        if (requiredForChain <= 0 && plannedCraftCount <= 0) {
+        const fromConsumption = Math.max(0, consumptionYieldByItemId.get(itemId) || 0);
+        const consumedCount = Math.max(0, consumedCountByItemId.get(itemId) || 0);
+        if (requiredForChain <= 0 && plannedCraftCount <= 0 && fromConsumption <= 0 && consumedCount <= 0) {
           return null;
         }
         const have = profileSnapshot ? Math.max(0, profileSnapshot.inventory[itemKey] || 0) : null;
         const expectedMission =
-          planTargetCraftedOnly && targetKeys.has(itemKey) ? 0 : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
+          planTargetCraftedOnly && targetKeys.has(itemKey) && isCraftedOnlyEligibleGoalKey(itemKey)
+            ? 0
+            : Math.max(0, missionExpectedByItemId.get(itemId) || 0);
         let plannedCraftTooltip: string | null = null;
         if (plannedCraftCount > 0) {
           const recipe = recipeMap[itemKey];
@@ -1721,15 +1873,40 @@ export default function MissionCraftPlannerPage() {
           }
         }
 
+        let fromConsumptionTooltip: string | null = null;
+        if (fromConsumption > 0) {
+          const lines = (consumptionYieldBreakdownByItemId.get(itemId) || [])
+            .map((entry) => ({
+              quantity: entry.quantity,
+              label: `${entry.sourceCount.toLocaleString()} consumed ${itemIdToLabel(entry.sourceItemId)}`,
+            }))
+            .sort((a, b) => b.quantity - a.quantity || a.label.localeCompare(b.label))
+            .map(
+              (entry) =>
+                `${entry.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })} - ${entry.label}`
+            );
+          if (lines.length > 0) {
+            fromConsumptionTooltip = ["From consumption:", ...lines].join("\n");
+          }
+        }
+
+        const consumedTooltip = consumedCount > 0
+          ? `Consume ${consumedCount.toLocaleString()} ${itemIdToLabel(itemId)}`
+          : null;
+
         return {
           itemId,
           plannedCraftCount,
           have,
           requiredForChain,
           expectedMission,
+          fromConsumption,
+          consumedCount,
           plannedCraftTooltip,
           neededTooltip,
           expectedMissionTooltip,
+          fromConsumptionTooltip,
+          consumedTooltip,
         } satisfies CraftPlanDetailRow;
       })
       .filter((row): row is CraftPlanDetailRow => row !== null);
@@ -2301,6 +2478,7 @@ export default function MissionCraftPlannerPage() {
     includeDropEpic,
     includeDropLegendary,
     includeDropFragments,
+    selectedConsumptionItemIds,
     shipDurations,
     inventorySource,
     prefsLoaded,
@@ -2321,6 +2499,7 @@ export default function MissionCraftPlannerPage() {
       priorityTime: activePriorityTimePct / 100,
       fastMode,
       allowedShipDurations: allowedShipDurationsForSolve,
+      selectedConsumptionItemIds,
       sourceFilters: { ...sourceFilters },
     };
     setTargetItemId(primaryTarget.targetItemId);
@@ -2408,6 +2587,7 @@ export default function MissionCraftPlannerPage() {
             targetCraftedOnly,
             targets: normalizedTargets,
             allowedShipDurations: allowedShipDurationsForSolve,
+            selectedConsumptionItemIds,
             solverFn: highsRef.current.solve,
             lootData: lootDataRef.current!,
             onProgress: (progress: PlannerProgressEvent) => {
@@ -2461,6 +2641,7 @@ export default function MissionCraftPlannerPage() {
           targetCraftedOnly,
           fastMode,
           allowedShipDurations: allowedShipDurationsForSolve,
+          selectedConsumptionItemIds,
         };
 
         const planResp = await fetch("/api/plan/stream", {
@@ -2628,6 +2809,7 @@ export default function MissionCraftPlannerPage() {
           includeDropLegendary,
           includeDropFragments,
           allowedShipDurations: allowedShipDurationsForReplan,
+          selectedConsumptionItemIds,
           observedReturns: [],
           missionLaunches: [],
         }),
@@ -2654,6 +2836,7 @@ export default function MissionCraftPlannerPage() {
         targetCraftedOnly,
         fastMode,
         allowedShipDurations: allowedShipDurationsForReplan,
+        selectedConsumptionItemIds,
         sourceFilters: { ...sourceFilters },
       });
 
@@ -2858,6 +3041,7 @@ export default function MissionCraftPlannerPage() {
         priorityTime: lastSolveRequest.priorityTime,
         fastMode: lastSolveRequest.fastMode,
         allowedShipDurations: lastSolveRequest.allowedShipDurations,
+        selectedConsumptionItemIds: lastSolveRequest.selectedConsumptionItemIds,
       },
       sourceFilters: lastSolveRequest.sourceFilters,
       profile: sanitizedProfile,
@@ -2902,21 +3086,25 @@ export default function MissionCraftPlannerPage() {
     try {
       const selectedCombos = response.plan.availableCombos.filter((c) => compareSelected.has(comboKey(c)));
       const compareTargetCraftedOnly = lastSolveRequest?.targetCraftedOnly ?? targetCraftedOnly;
+      const compareSourceFilters = lastSolveRequest?.sourceFilters ?? sourceFilters;
+      const compareConsumptionItemIds = lastSolveRequest?.selectedConsumptionItemIds ?? selectedConsumptionItemIds;
       const canCompareClientSide = highsRef.current.ready && lootDataRef.current != null;
 
       if (canCompareClientSide) {
         const results = await computeMonolithicPaths({
           profile: profileSnapshot as Parameters<typeof computeMonolithicPaths>[0]["profile"],
           targetItemId: response.plan.targetItemId,
+          targets: response.plan.targets,
           quantity: response.plan.quantity,
           targetCraftedOnly: compareTargetCraftedOnly,
           priorityTime: response.plan.priorityTime,
           selectedCombos: selectedCombos as Parameters<typeof computeMonolithicPaths>[0]["selectedCombos"],
+          selectedConsumptionItemIds: compareConsumptionItemIds,
           missionDropRarities: {
-            rare: sourceFilters.includeDropRare,
-            epic: sourceFilters.includeDropEpic,
-            legendary: sourceFilters.includeDropLegendary,
-            fragments: sourceFilters.includeDropFragments,
+            rare: compareSourceFilters.includeDropRare,
+            epic: compareSourceFilters.includeDropEpic,
+            legendary: compareSourceFilters.includeDropLegendary,
+            fragments: compareSourceFilters.includeDropFragments,
           },
           solverFn: highsRef.current.solve,
           lootData: lootDataRef.current!,
@@ -2926,14 +3114,16 @@ export default function MissionCraftPlannerPage() {
         const body = {
           profile: profileSnapshot,
           targetItemId: response.plan.targetItemId,
+          targets: response.plan.targets,
           quantity: response.plan.quantity,
           targetCraftedOnly: compareTargetCraftedOnly,
           priorityTime: response.plan.priorityTime,
           selectedCombos,
-          includeDropRare: sourceFilters.includeDropRare,
-          includeDropEpic: sourceFilters.includeDropEpic,
-          includeDropLegendary: sourceFilters.includeDropLegendary,
-          includeDropFragments: sourceFilters.includeDropFragments,
+          selectedConsumptionItemIds: compareConsumptionItemIds,
+          includeDropRare: compareSourceFilters.includeDropRare,
+          includeDropEpic: compareSourceFilters.includeDropEpic,
+          includeDropLegendary: compareSourceFilters.includeDropLegendary,
+          includeDropFragments: compareSourceFilters.includeDropFragments,
         };
         const res = await fetch("/api/plan/compare", {
           method: "POST",
@@ -2970,6 +3160,30 @@ export default function MissionCraftPlannerPage() {
       {enabled ? "Use" : "Skip"}
     </button>
   );
+
+  const toggleConsumptionItem = (itemId: string) => {
+    setSelectedConsumptionItemIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return Array.from(next).sort((a, b) => {
+        const aKey = itemIdToKey(a);
+        const bKey = itemIdToKey(b);
+        return aKey.localeCompare(bKey);
+      });
+    });
+  };
+
+  const clearShipDurations = () => {
+    const cleared: ShipDurationSelection = {};
+    for (const entry of SHIP_DISPLAY_CONFIG) {
+      cleared[entry.ship] = { SHORT: false, LONG: false, EPIC: false };
+    }
+    setShipDurations(cleared);
+  };
 
   return (
     <main className="page">
@@ -3081,22 +3295,116 @@ export default function MissionCraftPlannerPage() {
                 </span>
                 <span className={styles.matrixCell}>{renderSourceToggle(includeDropFragments, setIncludeDropFragments, "Dropped stone fragments")}</span>
               </div>
+              <div className={styles.consumptionDrawer}>
+                <div className={styles.selectorHeader}>
+                  <button
+                    type="button"
+                    className={styles.consumptionDrawerToggle}
+                    onClick={() => setConsumptionDrawerOpen((prev) => !prev)}
+                    aria-expanded={consumptionDrawerOpen}
+                  >
+                    <span className={styles.shipSelectorToggleLeft}>
+                      <span className={styles.shipSelectorChevron} data-open={consumptionDrawerOpen ? "1" : "0"} />
+                      <span>Consumption</span>
+                    </span>
+                  </button>
+                  <span className={styles.selectorMeta}>
+                    <span className={styles.shipSelectorCount}>
+                      {selectedConsumptionItemIds.length} <em>selected</em>
+                    </span>
+                    <span className={styles.selectorMetaDivider} aria-hidden="true">·</span>
+                    <button
+                      type="button"
+                      className={`${styles.selectorQuickAction} ${styles.selectorQuickAll}`}
+                      onClick={() => setSelectedConsumptionItemIds(allConsumptionItemIds)}
+                    >
+                      <span aria-hidden="true">✓</span>ALL
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.selectorQuickAction} ${styles.selectorQuickNone}`}
+                      onClick={() => setSelectedConsumptionItemIds([])}
+                    >
+                      <span aria-hidden="true">×</span>NONE
+                    </button>
+                  </span>
+                </div>
+                {consumptionDrawerOpen && (
+                  <>
+                    <div className={styles.consumptionHelpText}>
+                      Artifacts consumed only if it helps overall plan and you have stone goals
+                    </div>
+                    <div className={styles.consumptionGrid}>
+                      {consumptionFamilies.map((family) => (
+                        <div key={family.familyKey} className={styles.consumptionFamily}>
+                          <div className={styles.consumptionFamilyName}>{family.shortName}</div>
+                          <div className={styles.consumptionTiers}>
+                            {family.tiers.map((tier) => {
+                              const selected = selectedConsumptionSet.has(tier.itemId);
+                              return (
+                                <button
+                                  key={tier.itemId}
+                                  type="button"
+                                  className={styles.consumptionTierButton}
+                                  data-selected={selected ? "1" : "0"}
+                                  data-disabled={tier.hasYield ? "0" : "1"}
+                                  aria-pressed={selected}
+                                  title={tier.hasYield ? tier.label : `${tier.label}: no stone yield`}
+                                  disabled={!tier.hasYield}
+                                  onClick={() => toggleConsumptionItem(tier.itemId)}
+                                >
+                                  {tier.iconUrl ? (
+                                    <img src={tier.iconUrl} alt="" width={18} height={18} loading="lazy" />
+                                  ) : (
+                                    <span className={styles.targetPickerFallbackIcon} aria-hidden="true">?</span>
+                                  )}
+                                  <span>T{tier.tier}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className={styles.shipSelectorWrap}>
-              <button
-                type="button"
-                className={styles.shipSelectorToggle}
-                onClick={() => setShipSelectorOpen((prev) => !prev)}
-              >
-                <span className={styles.shipSelectorToggleLeft}>
-                  <span className={styles.shipSelectorChevron} data-open={shipSelectorOpen ? "1" : "0"} />
-                  <span>Ships</span>
+              <div className={styles.selectorHeader}>
+                <button
+                  type="button"
+                  className={styles.shipSelectorToggle}
+                  onClick={() => setShipSelectorOpen((prev) => !prev)}
+                  aria-expanded={shipSelectorOpen}
+                >
+                  <span className={styles.shipSelectorToggleLeft}>
+                    <span className={styles.shipSelectorChevron} data-open={shipSelectorOpen ? "1" : "0"} />
+                    <span>Ships</span>
+                  </span>
+                </button>
+                <span className={styles.selectorMeta}>
+                  <span className={styles.shipSelectorCount}>
+                    {shipSelectorSummary.selectedShips} <em>selected</em>
+                  </span>
+                  <span className={styles.selectorMetaDivider} aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    className={`${styles.selectorQuickAction} ${styles.selectorQuickAll}`}
+                    onClick={() => setShipDurations(buildDefaultShipDurations())}
+                  >
+                    <span aria-hidden="true">✓</span>ALL
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.selectorQuickAction} ${styles.selectorQuickNone}`}
+                    onClick={clearShipDurations}
+                  >
+                    <span aria-hidden="true">×</span>NONE
+                  </button>
                 </span>
-                <span className={styles.shipSelectorCount}>
-                  {shipSelectorSummary.selectedShips} / {shipSelectorSummary.totalShips} <em>selected</em>
-                </span>
-              </button>
+              </div>
 
               {!shipSelectorOpen && (
                 <div className={styles.shipChips} aria-label="Selected ship durations">
@@ -3124,26 +3432,6 @@ export default function MissionCraftPlannerPage() {
 
               {shipSelectorOpen && (
                 <div className={styles.shipSelectorPanel}>
-                  <div className={styles.shipSelectorActions}>
-                    <button
-                      type="button"
-                      onClick={() => setShipDurations(buildDefaultShipDurations())}
-                    >
-                      Select all
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const cleared: ShipDurationSelection = {};
-                        for (const entry of SHIP_DISPLAY_CONFIG) {
-                          cleared[entry.ship] = { SHORT: false, LONG: false, EPIC: false };
-                        }
-                        setShipDurations(cleared);
-                      }}
-                    >
-                      Deselect all
-                    </button>
-                  </div>
                   <div className={styles.shipSelectorList}>
                     {SHIP_DISPLAY_CONFIG.map((entry) => {
                       const dur = shipDurations[entry.ship] || { SHORT: true, LONG: true, EPIC: true };
@@ -3204,7 +3492,7 @@ export default function MissionCraftPlannerPage() {
               <div className={styles.controlCardHeader}>
                 <div className={styles.controlCardTitle}>
                   <span className={styles.titleDot} aria-hidden="true" />
-                  Targets
+                  Goals
                 </div>
                 <label className={styles.customCheck} htmlFor="targetCraftedOnly">
                   <input
@@ -3216,9 +3504,9 @@ export default function MissionCraftPlannerPage() {
                   <span aria-hidden="true" />
                   <span
                     className={styles.tooltipValue}
-                    title="Only count copies you craft toward requested target quantities. Mission drops can still supply ingredients, but requested target drops themselves are ignored."
+                    title="For artifact goals only, count crafted copies toward the requested goal and ignore mission drops of that same artifact. Stone, gold meteorite, geode, and solar titanium goals still count mission drops because they cannot be shiny."
                   >
-                    Only crafted
+                    Artifacts: only crafted
                   </span>
                 </label>
               </div>
@@ -3483,8 +3771,10 @@ export default function MissionCraftPlannerPage() {
                       <th>Item</th>
                       <th>Needed</th>
                       <th>Have</th>
-                      <th>Planned craft</th>
-                      <th>Expected mission</th>
+                      <th><span className={styles.stackedTableHeader}>Planned<br />Craft</span></th>
+                      <th><span className={styles.stackedTableHeader}>Expected<br />Mission</span></th>
+                      <th><span className={styles.stackedTableHeader}>From<br />Consumption</span></th>
+                      <th>Consumed</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3531,6 +3821,22 @@ export default function MissionCraftPlannerPage() {
                               title={craft.expectedMission > 0 ? craft.expectedMissionTooltip || undefined : undefined}
                             >
                               {craft.expectedMission.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </span>
+                          </td>
+                          <td>
+                            <span
+                              className={craft.fromConsumption > 0 && craft.fromConsumptionTooltip ? styles.tooltipValue : undefined}
+                              title={craft.fromConsumption > 0 ? craft.fromConsumptionTooltip || undefined : undefined}
+                            >
+                              {craft.fromConsumption.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </span>
+                          </td>
+                          <td>
+                            <span
+                              className={craft.consumedCount > 0 && craft.consumedTooltip ? styles.tooltipValue : undefined}
+                              title={craft.consumedCount > 0 ? craft.consumedTooltip || undefined : undefined}
+                            >
+                              {craft.consumedCount > 0 ? craft.consumedCount.toLocaleString() : "0"}
                             </span>
                           </td>
                         </tr>

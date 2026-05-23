@@ -227,6 +227,36 @@ describe("planForTarget coverage handling", () => {
     expect(result.notes.some((note) => note.includes("unified HiGHS model"))).toBe(true);
   });
 
+  it("can consume a selected artifact from inventory for expected stone yield", async () => {
+    mockedLoadLootData.mockResolvedValue({
+      missions: [],
+    });
+    mockedSolveWithHighs.mockResolvedValue({
+      Status: "Optimal",
+      Columns: {
+        x_0: { Primal: 1 },
+        u_0: { Primal: 0 },
+        u_1: { Primal: 0 },
+      },
+    });
+
+    const profile = baseProfile();
+    profile.inventory.light_of_eggendil_1 = 1;
+
+    const result = await planForTarget(profile, "clarity-stone-1", 1, 0.5, {
+      selectedConsumptionItemIds: ["light-of-eggendil-1"],
+    });
+
+    expect(result.consumptions).toHaveLength(1);
+    expect(result.consumptions[0].itemId).toBe("light-of-eggendil-1");
+    expect(result.consumptions[0].count).toBe(1);
+    expect(result.consumptions[0].yields).toContainEqual({
+      itemId: "clarity-stone-1",
+      quantity: expect.any(Number),
+    });
+    expect(result.unmetItems).toEqual([]);
+  });
+
   it("filters mission target rows with too few estimated launches or drops", async () => {
     mockedLoadLootData.mockResolvedValue({
       missions: [
@@ -793,15 +823,15 @@ describe("planForTarget coverage handling", () => {
                   targetAfxId: 10000,
                   items: [
                     {
-                      afxId: 12,
+                      afxId: 23,
                       afxLevel: 2,
-                      itemId: "soul-stone-2",
+                      itemId: "puzzle-cube-2",
                       counts: [5000, 0, 0, 0],
                     },
                     {
-                      afxId: 12,
+                      afxId: 23,
                       afxLevel: 1,
-                      itemId: "soul-stone-1",
+                      itemId: "puzzle-cube-1",
                       counts: [100000, 0, 0, 0],
                     },
                   ],
@@ -837,7 +867,7 @@ describe("planForTarget coverage handling", () => {
       },
     ];
 
-    const result = await planForTarget(profile, "soul-stone-2", 2, 0.5, { targetCraftedOnly: true });
+    const result = await planForTarget(profile, "puzzle-cube-2", 2, 0.5, { targetCraftedOnly: true });
 
     const targetDemandLine = lpModel.split("\n").find((line) => line.trimStart().startsWith("b_1:")) || "";
     expect(targetDemandLine).toContain("c_0");
@@ -845,7 +875,7 @@ describe("planForTarget coverage handling", () => {
     expect(targetDemandLine).toContain(">= 2");
     expect(result.targetBreakdown.fromCraft).toBe(2);
     expect(result.targetBreakdown.fromMissionsExpected).toBe(0);
-    expect(result.notes.some((note) => note.includes("Only crafted target mode enabled"))).toBe(true);
+    expect(result.notes.some((note) => note.includes("Artifacts-only crafted goal mode enabled"))).toBe(true);
   });
 
   it("runs an integer re-solve in fast mode for non-GE priorities", async () => {

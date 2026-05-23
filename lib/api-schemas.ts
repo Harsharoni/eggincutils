@@ -105,6 +105,7 @@ export const planRequestSchema = z
     allowedShipDurations: z
       .array(z.object({ ship: z.string().min(1), durationType: z.enum(["SHORT", "LONG", "EPIC"]) }))
       .optional(),
+    selectedConsumptionItemIds: z.array(z.string().trim().min(1)).max(84).optional(),
   })
   .transform((value) => ({
     eid: value.eid,
@@ -125,6 +126,7 @@ export const planRequestSchema = z
     targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
     fastMode: parseFastMode(value.fastMode),
     allowedShipDurations: value.allowedShipDurations,
+    selectedConsumptionItemIds: value.selectedConsumptionItemIds ?? [],
   }));
 
 export type PlanRequest = z.infer<typeof planRequestSchema>;
@@ -206,6 +208,7 @@ export const replanRequestSchema = z.object({
   allowedShipDurations: z
     .array(z.object({ ship: z.string().min(1), durationType: z.enum(["SHORT", "LONG", "EPIC"]) }))
     .optional(),
+  selectedConsumptionItemIds: z.array(z.string().trim().min(1)).max(84).optional(),
   observedReturns: z.array(observedReturnSchema).optional().default([]),
   missionLaunches: z.array(missionLaunchUpdateSchema).optional().default([]),
 }).transform((value) => ({
@@ -217,6 +220,7 @@ export const replanRequestSchema = z.object({
   includeDropLegendary: parseEnabledByDefault(value.includeDropLegendary, true),
   includeDropFragments: parseEnabledByDefault(value.includeDropFragments, true),
   targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
+  selectedConsumptionItemIds: value.selectedConsumptionItemIds ?? [],
 }));
 
 export type ReplanRequest = z.infer<typeof replanRequestSchema>;
@@ -224,6 +228,17 @@ export type ReplanRequest = z.infer<typeof replanRequestSchema>;
 const planCraftRowSchema = z.object({
   itemId: z.string().min(1),
   count: nonNegativeIntSchema,
+});
+
+const planConsumptionRowSchema = z.object({
+  itemId: z.string().min(1),
+  count: nonNegativeIntSchema,
+  yields: z.array(
+    z.object({
+      itemId: z.string().min(1),
+      quantity: nonNegativeFiniteSchema,
+    })
+  ),
 });
 
 const planMissionYieldSchema = z.object({
@@ -294,6 +309,7 @@ export const plannerResultSchema = z.object({
   expectedHours: nonNegativeFiniteSchema,
   weightedScore: nonNegativeFiniteSchema,
   crafts: z.array(planCraftRowSchema),
+  consumptions: z.array(planConsumptionRowSchema).default([]),
   missions: z.array(planMissionRowSchema),
   unmetItems: z.array(planUnmetItemSchema),
   targetBreakdown: planTargetBreakdownSchema,
@@ -326,6 +342,7 @@ const selectedComboSchema = z.object({
 export const compareRequestSchema = z.object({
   profile: playerProfileSchema,
   targetItemId: z.string().trim().min(1, "targetItemId is required"),
+  targets: z.array(plannerTargetSchema).min(1).max(10).optional(),
   quantity: z.coerce
     .number()
     .finite()
@@ -343,6 +360,7 @@ export const compareRequestSchema = z.object({
   includeDropLegendary: z.union([z.boolean(), z.number(), z.string()]).optional(),
   includeDropFragments: z.union([z.boolean(), z.number(), z.string()]).optional(),
   targetCraftedOnly: z.union([z.boolean(), z.number(), z.string()]).optional(),
+  selectedConsumptionItemIds: z.array(z.string().trim().min(1)).max(84).optional(),
 }).transform((value) => ({
   ...value,
   includeDropRare: parseEnabledByDefault(value.includeDropRare, true),
@@ -350,6 +368,7 @@ export const compareRequestSchema = z.object({
   includeDropLegendary: parseEnabledByDefault(value.includeDropLegendary, true),
   includeDropFragments: parseEnabledByDefault(value.includeDropFragments, true),
   targetCraftedOnly: parseDisabledByDefault(value.targetCraftedOnly),
+  selectedConsumptionItemIds: value.selectedConsumptionItemIds ?? [],
 }));
 
 export type CompareRequest = z.infer<typeof compareRequestSchema>;

@@ -158,6 +158,7 @@ export async function POST(request: Request): Promise<Response> {
               targetCraftedOnly: parsedPayload.data.targetCraftedOnly,
               targets: parsedPayload.data.targets,
               allowedShipDurations: parsedPayload.data.allowedShipDurations,
+              selectedConsumptionItemIds: parsedPayload.data.selectedConsumptionItemIds,
               onProgress: (progress) => {
                 emitProgress({
                   ...progress,
