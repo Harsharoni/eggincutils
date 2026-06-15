@@ -6,6 +6,7 @@ npm-debug.log*
 local_data/
 .agents/
 .worktrees/
+.claude/
     
 # Emacs temp/lock/autosave files
 *~
