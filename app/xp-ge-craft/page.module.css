@@ -1,9 +1,10 @@
 .inputSection {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   margin-top: 10px;
+  margin-bottom: 16px;
 }
 
 .inputSection label {
@@ -12,14 +13,42 @@
   font-weight: 700;
 }
 
+.inputPrimaryRow {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inputField {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .inputSection input[type="text"] {
   width: 280px;
+}
+
+.inputField select,
+.inputField input[type="text"] {
+  min-height: 36px;
+}
+
+.inputField select {
+  min-width: 160px;
 }
 
 .inputCheckbox {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.saleCheckbox {
+  min-height: 36px;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
 .ingredientSourceGroup {
@@ -40,6 +69,168 @@
   font-weight: 800;
 }
 
+.prePlanDrawer {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--card), white 12%);
+}
+
+.prePlanSummary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 8px 10px;
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.prePlanSummary::-webkit-details-marker {
+  display: none;
+}
+
+.prePlanTitleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.prePlanCaret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--panel), var(--accent) 10%);
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.prePlanDrawer[open] .prePlanCaret {
+  transform: rotate(90deg);
+}
+
+.prePlanSummaryMeta {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.prePlanTooltipText {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.prePlanStaleText {
+  color: var(--error-ink);
+  font-weight: 800;
+}
+
+.prePlanDrawerBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.prePlanComposer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+.prePlanInlineField {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.prePlanInlineField label {
+  white-space: nowrap;
+}
+
+.prePlanInlineField select,
+.prePlanInlineField input[type="text"] {
+  min-height: 34px;
+}
+
+.prePlanInlineField select {
+  min-width: 170px;
+}
+
+.prePlanQuantityField input[type="text"] {
+  width: 74px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.prePlanAddButton {
+  min-height: 36px;
+  padding: 0 13px;
+}
+
+.prePlanList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.prePlanChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent), transparent 91%);
+  color: var(--navy);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.prePlanChip button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid color-mix(in oklab, var(--stroke), black 4%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--card), white 18%);
+  color: var(--muted);
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.prePlanChip button:hover {
+  color: var(--error-ink);
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.prePlanMeta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .errorBox {
   margin-top: 12px;
   padding: 10px;
@@ -52,7 +243,7 @@
 .summary {
   display: flex;
   gap: 12px;
-  margin-top: 12px;
+  margin-top: 16px;
   flex-wrap: wrap;
 }
 

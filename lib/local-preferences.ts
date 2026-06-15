@@ -18,6 +18,7 @@ export const LOCAL_PREF_KEYS = {
   craftMaxXpPlanView: "eggincutils-craft-max-xp-plan-view",
   craftStandaloneOpen: "eggincutils-craft-standalone-open",
   craftAllLimits: "eggincutils-craft-all-limits",
+  craftPrePlanSends: "eggincutils-craft-pre-plan-sends",
   plannerIncludeInventoryRare: "eggincutils-planner-include-inventory-rare",
   plannerIncludeInventoryEpic: "eggincutils-planner-include-inventory-epic",
   plannerIncludeInventoryLegendary: "eggincutils-planner-include-inventory-legendary",

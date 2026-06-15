@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import React, { JSX, useEffect, useState } from "react";
+import React, { JSX, useEffect, useMemo, useState } from "react";
 
+import targetFamilies from "../../data/target-families.json";
 import { getArtifactDisplayData, getArtifactDisplayLabel } from "../../lib/artifact-display";
 import {
   getCraftingLevelProgress,
   getCraftingLevelThresholds,
   getCraftingLevelTotalXpForLevel,
 } from "../../lib/crafting-levels";
+import { afxIdToTargetFamilyName } from "../../lib/item-utils";
 import { recipes } from "../../lib/recipes";
 import {
   LOCAL_PREF_KEYS,
@@ -39,10 +41,23 @@ type MaxXpPlanView = "tree" | "flat";
 type CraftingXpZoomMode = "level" | "full";
 type MaxXpFlatSortKey = "artifact" | "tier" | "manualCrafts" | "autoCrafts" | "xp" | "cost" | "netRemaining" | "usedBy";
 type SortDirection = "asc" | "desc";
+type PrePlanDurationType = "SHORT" | "LONG" | "EPIC";
+type PrePlanSendRow = {
+  id: string;
+  ship: string;
+  durationType: PrePlanDurationType;
+  targetAfxId: number;
+  launches: number;
+};
 type InventoryResponse = {
   inventory?: Record<string, number>;
   craftCounts?: Record<string, number>;
   craftingXp?: number;
+  prePlanSends?: {
+    addedInventory?: Record<string, number>;
+    appliedLaunches?: number;
+    skippedLaunches?: number;
+  };
   error?: string;
   details?: string;
 };
@@ -117,11 +132,41 @@ type OptimizePayload = {
   inventory: Record<string, number>;
   craftCounts: Record<string, number>;
   craftingXp: number;
+  prePlanSends?: InventoryResponse["prePlanSends"];
 };
 
 const SHARED_EID_KEYS = [LOCAL_PREF_KEYS.sharedEid, LOCAL_PREF_KEYS.legacyEid] as const;
 const SHARED_INCLUDE_SLOTTED_KEYS = [LOCAL_PREF_KEYS.sharedIncludeSlotted, LOCAL_PREF_KEYS.legacyIncludeSlotted] as const;
 const SHARED_CRAFTING_SALE_KEYS = [LOCAL_PREF_KEYS.sharedCraftingSale] as const;
+const PRE_PLAN_UNTARGETED_TARGET_AFX_ID = 10000;
+const PRE_PLAN_UNTARGETED_ONLY_SHIPS = new Set(["CHICKEN_ONE", "CHICKEN_NINE", "CHICKEN_HEAVY", "BCR"]);
+const PRE_PLAN_SHIPS = [
+  "ATREGGIES",
+  "HENERPRISE",
+  "VOYEGGER",
+  "CHICKFIANT",
+  "GALEGGTICA",
+  "CORELLIHEN_CORVETTE",
+  "MILLENIUM_CHICKEN",
+  "BCR",
+  "CHICKEN_HEAVY",
+  "CHICKEN_NINE",
+  "CHICKEN_ONE",
+];
+const PRE_PLAN_DURATIONS: Array<{ value: PrePlanDurationType; label: string }> = [
+  { value: "SHORT", label: "Short" },
+  { value: "LONG", label: "Standard" },
+  { value: "EPIC", label: "Extended" },
+];
+const PRE_PLAN_TARGET_OPTIONS = [
+  { afxId: PRE_PLAN_UNTARGETED_TARGET_AFX_ID, label: "Untargeted" },
+  ...Object.values(
+    targetFamilies as Record<string, { afxId: number; name: string; representativeItemId: string | null }>
+  )
+    .filter((entry) => Number.isFinite(entry.afxId) && entry.representativeItemId)
+    .map((entry) => ({ afxId: entry.afxId, label: entry.name }))
+    .sort((a, b) => a.label.localeCompare(b.label)),
+];
 const INVENTORY_MATRIX_FAMILIES: InventoryMatrixFamily[] = [
   { key: "tachyon_deflector", label: "Deflector" },
   { key: "dilithium_monocle", label: "Monocle" },
@@ -166,11 +211,27 @@ async function getOptimalCrafts(
   includeFragments: boolean,
   saleEnabled: boolean,
   inventorySource: InventorySource,
-  craftLimits: CraftLimits
+  craftLimits: CraftLimits,
+  prePlanSends: PrePlanSendRow[]
 ): Promise<OptimizePayload> {
-  const response = await fetch(
-    `/api/inventory?eid=${encodeURIComponent(eid)}&includeSlotted=${includeSlotted ? "true" : "false"}&includeInventoryFragments=${includeFragments ? "true" : "false"}&inventorySource=${encodeURIComponent(inventorySource)}`
-  );
+  const params = new URLSearchParams({
+    eid,
+    includeSlotted: includeSlotted ? "true" : "false",
+    includeInventoryFragments: includeFragments ? "true" : "false",
+    inventorySource,
+  });
+  const normalizedPrePlanSends = prePlanSends
+    .map((send) => ({
+      ship: send.ship,
+      durationType: send.durationType,
+      targetAfxId: send.targetAfxId,
+      launches: send.launches,
+    }))
+    .filter((send) => send.launches > 0);
+  if (normalizedPrePlanSends.length > 0) {
+    params.set("prePlanSends", JSON.stringify(normalizedPrePlanSends));
+  }
+  const response = await fetch(`/api/inventory?${params.toString()}`);
   let data: InventoryResponse | null = null;
   try {
     data = (await response.json()) as InventoryResponse;
@@ -192,7 +253,103 @@ async function getOptimalCrafts(
     inventory,
     craftCounts,
     craftingXp,
+    prePlanSends: data.prePlanSends,
   };
+}
+
+function titleCaseShip(ship: string): string {
+  const overrides: Record<string, string> = {
+    ATREGGIES: "Henliner",
+    CHICKFIANT: "Defihent",
+    CORELLIHEN_CORVETTE: "Cornish-Hen Corvette",
+    MILLENIUM_CHICKEN: "Quintillion Chicken",
+    BCR: "BCR",
+  };
+  if (overrides[ship]) {
+    return overrides[ship];
+  }
+  return ship
+    .toLowerCase()
+    .split("_")
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(" ");
+}
+
+function durationTypeLabel(durationType: PrePlanDurationType): string {
+  return PRE_PLAN_DURATIONS.find((entry) => entry.value === durationType)?.label || durationType;
+}
+
+function prePlanSendLabel(send: PrePlanSendRow): string {
+  return `${send.launches.toLocaleString()}x ${titleCaseShip(send.ship)} ${durationTypeLabel(send.durationType)} / ${afxIdToTargetFamilyName(send.targetAfxId)}`;
+}
+
+function prePlanSendsSignature(sends: PrePlanSendRow[]): string {
+  return JSON.stringify(
+    sends.map((send) => ({
+      ship: send.ship,
+      durationType: send.durationType,
+      targetAfxId: send.targetAfxId,
+      launches: send.launches,
+    }))
+  );
+}
+
+function formatPrePlanAdditionsTooltip(addedInventory: Record<string, number> | undefined): string {
+  if (!addedInventory) {
+    return "";
+  }
+  const rows = Object.entries(addedInventory)
+    .filter(([, quantity]) => quantity > 0)
+    .sort((a, b) => b[1] - a[1] || getArtifactDisplayLabel(a[0]).localeCompare(getArtifactDisplayLabel(b[0])));
+  if (rows.length === 0) {
+    return "";
+  }
+  return [
+    "Expected inventory additions:",
+    ...rows.map(([itemKey, quantity]) => `${getArtifactDisplayLabel(itemKey)}: ${quantity.toFixed(quantity >= 10 ? 1 : 3)}`),
+  ].join("\n");
+}
+
+function parseStoredPrePlanSends(raw: string | null): PrePlanSendRow[] {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((value, index): PrePlanSendRow | null => {
+        if (!value || typeof value !== "object") {
+          return null;
+        }
+        const record = value as Partial<PrePlanSendRow>;
+        const durationType = record.durationType;
+        if (
+          typeof record.ship !== "string" ||
+          !PRE_PLAN_SHIPS.includes(record.ship) ||
+          (durationType !== "SHORT" && durationType !== "LONG" && durationType !== "EPIC")
+        ) {
+          return null;
+        }
+        const launches = Math.max(1, Math.min(10_000, Math.round(Number(record.launches) || 1)));
+        const targetAfxId = PRE_PLAN_UNTARGETED_ONLY_SHIPS.has(record.ship)
+          ? PRE_PLAN_UNTARGETED_TARGET_AFX_ID
+          : Math.round(Number(record.targetAfxId) || PRE_PLAN_UNTARGETED_TARGET_AFX_ID);
+        return {
+          id: typeof record.id === "string" && record.id ? record.id : `saved-${index}-${record.ship}-${durationType}-${targetAfxId}`,
+          ship: record.ship,
+          durationType,
+          targetAfxId,
+          launches,
+        };
+      })
+      .filter((row): row is PrePlanSendRow => row !== null)
+      .slice(0, 20);
+  } catch {
+    return [];
+  }
 }
 
 function getModeRowKey(artifact: string, mode: SequentialMode): string {
@@ -1046,6 +1203,14 @@ export default function XpGeCraftPage(): JSX.Element {
   const [standaloneOpen, setStandaloneOpen] = useState<boolean>(true);
   const [appliedCraftLimits, setAppliedCraftLimits] = useState<CraftLimits>({});
   const [draftCraftLimitInputs, setDraftCraftLimitInputs] = useState<Record<string, string>>({});
+  const [prePlanSends, setPrePlanSends] = useState<PrePlanSendRow[]>([]);
+  const [draftPrePlanShip, setDraftPrePlanShip] = useState<string>("ATREGGIES");
+  const [draftPrePlanDuration, setDraftPrePlanDuration] = useState<PrePlanDurationType>("EPIC");
+  const [draftPrePlanTargetAfxId, setDraftPrePlanTargetAfxId] = useState<number>(PRE_PLAN_UNTARGETED_TARGET_AFX_ID);
+  const [draftPrePlanLaunches, setDraftPrePlanLaunches] = useState<string>("1");
+  const [prePlanOpen, setPrePlanOpen] = useState<boolean>(false);
+  const [lastPrePlanResult, setLastPrePlanResult] = useState<InventoryResponse["prePlanSends"] | null>(null);
+  const [lastSolvedPrePlanSignature, setLastSolvedPrePlanSignature] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [prefsLoaded, setPrefsLoaded] = useState<boolean>(false);
@@ -1085,6 +1250,7 @@ export default function XpGeCraftPage(): JSX.Element {
     const savedCraftLimits = parseStoredCraftLimits(readFirstStoredString([LOCAL_PREF_KEYS.craftAllLimits]));
     setAppliedCraftLimits(savedCraftLimits);
     setDraftCraftLimitInputs(craftLimitsToInputs(savedCraftLimits));
+    setPrePlanSends(parseStoredPrePlanSends(readFirstStoredString([LOCAL_PREF_KEYS.craftPrePlanSends])));
     setPrefsLoaded(true);
   }, []);
 
@@ -1149,6 +1315,13 @@ export default function XpGeCraftPage(): JSX.Element {
   }, [appliedCraftLimits, prefsLoaded]);
 
   useEffect(() => {
+    if (!prefsLoaded) {
+      return;
+    }
+    writeStoredString([LOCAL_PREF_KEYS.craftPrePlanSends], JSON.stringify(prePlanSends));
+  }, [prePlanSends, prefsLoaded]);
+
+  useEffect(() => {
     if (!highs || !planSourceInventory) {
       return;
     }
@@ -1170,16 +1343,28 @@ export default function XpGeCraftPage(): JSX.Element {
     setPlanSourceInventory(null);
     setPlanSourceCraftCounts({});
     setPlanSourceCraftingXp(null);
+    setLastPrePlanResult(null);
     setIsLoading(true);
     try {
       const nextLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
       setAppliedCraftLimits(nextLimits);
       setDraftCraftLimitInputs(craftLimitsToInputs(nextLimits));
-      const result = await getOptimalCrafts(highs, eid, includeSlotted, includeFragments, craftingSale, inventorySource, nextLimits);
+      const result = await getOptimalCrafts(
+        highs,
+        eid,
+        includeSlotted,
+        includeFragments,
+        craftingSale,
+        inventorySource,
+        nextLimits,
+        prePlanSends
+      );
       setSolution(result.solution);
       setPlanSourceInventory(result.inventory);
       setPlanSourceCraftCounts(result.craftCounts);
       setPlanSourceCraftingXp(result.craftingXp);
+      setLastPrePlanResult(result.prePlanSends || null);
+      setLastSolvedPrePlanSignature(prePlanSendsSignature(prePlanSends));
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "Unable to load inventory.";
       setError(message);
@@ -1202,6 +1387,30 @@ export default function XpGeCraftPage(): JSX.Element {
   const draftCraftLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
   const hasPendingCraftLimits = !craftLimitsEqual(draftCraftLimits, appliedCraftLimits);
   const visibleCraftLimits = solution ? draftCraftLimits : appliedCraftLimits;
+  const selectedDraftShipIsUntargetedOnly = PRE_PLAN_UNTARGETED_ONLY_SHIPS.has(draftPrePlanShip);
+  const draftPrePlanShipDuration = `${draftPrePlanShip}|${draftPrePlanDuration}`;
+  const currentPrePlanSignature = prePlanSendsSignature(prePlanSends);
+  const prePlanAssumptionsStale = Boolean(
+    solution && lastSolvedPrePlanSignature != null && currentPrePlanSignature !== lastSolvedPrePlanSignature
+  );
+  const prePlanTotalLaunches = prePlanSends.reduce((sum, send) => sum + send.launches, 0);
+  const prePlanAddedItemCount = lastPrePlanResult?.addedInventory
+    ? Object.values(lastPrePlanResult.addedInventory).filter((quantity) => quantity > 0).length
+    : 0;
+  const prePlanAdditionsTooltip = formatPrePlanAdditionsTooltip(lastPrePlanResult?.addedInventory);
+
+  const shipDurationOptions = useMemo(
+    () =>
+      PRE_PLAN_SHIPS.flatMap((ship) =>
+        PRE_PLAN_DURATIONS.map((duration) => ({
+          value: `${ship}|${duration.value}`,
+          ship,
+          durationType: duration.value,
+          label: `${titleCaseShip(ship)} · ${duration.label}`,
+        }))
+      ),
+    []
+  );
 
   function applyCraftLimitDrafts(): void {
     const nextLimits = normalizeCraftLimitInputs(draftCraftLimitInputs);
@@ -1232,6 +1441,41 @@ export default function XpGeCraftPage(): JSX.Element {
       delete next[artifact];
       return next;
     });
+  }
+
+  function addPrePlanSend(): void {
+    const launches = Math.max(1, Math.min(10_000, Math.round(Number(draftPrePlanLaunches) || 1)));
+    const targetAfxId = selectedDraftShipIsUntargetedOnly
+      ? PRE_PLAN_UNTARGETED_TARGET_AFX_ID
+      : draftPrePlanTargetAfxId;
+    setPrePlanSends((previous) => [
+      ...previous,
+      {
+        id: `${Date.now()}-${draftPrePlanShip}-${draftPrePlanDuration}-${targetAfxId}-${launches}`,
+        ship: draftPrePlanShip,
+        durationType: draftPrePlanDuration,
+        targetAfxId,
+        launches,
+      },
+    ].slice(0, 20));
+    setDraftPrePlanLaunches("1");
+  }
+
+  function removePrePlanSend(id: string): void {
+    setPrePlanSends((previous) => previous.filter((send) => send.id !== id));
+  }
+
+  function updateDraftPrePlanShipDuration(value: string): void {
+    const [ship, durationTypeRaw] = value.split("|");
+    const durationType = durationTypeRaw as PrePlanDurationType;
+    if (!PRE_PLAN_SHIPS.includes(ship) || !["SHORT", "LONG", "EPIC"].includes(durationType)) {
+      return;
+    }
+    setDraftPrePlanShip(ship);
+    setDraftPrePlanDuration(durationType);
+    if (PRE_PLAN_UNTARGETED_ONLY_SHIPS.has(ship)) {
+      setDraftPrePlanTargetAfxId(PRE_PLAN_UNTARGETED_TARGET_AFX_ID);
+    }
   }
 
   function renderMaxCraftInput(artifact: string): JSX.Element {
@@ -1373,60 +1617,159 @@ export default function XpGeCraftPage(): JSX.Element {
         </div>
 
         <div className={styles.inputSection}>
-          <label htmlFor="eidInput">EID</label>
-          <input
-            id="eidInput"
-            type="text"
-            value={eid}
-            onChange={(event) => setEID(event.target.value)}
-            onPaste={(event) => {
-              event.preventDefault();
-              setEID(event.clipboardData.getData("text"));
-            }}
-            placeholder="EI123..."
-          />
-          <button onClick={runOptimize} disabled={isLoading}>
-            {isLoading ? "Calculating..." : "Calculate"}
-          </button>
-          <fieldset className={styles.ingredientSourceGroup}>
-            <legend>Include as ingredients</legend>
-            <label className={styles.inputCheckbox}>
+          <div className={styles.inputPrimaryRow}>
+            <div className={styles.inputField}>
+              <label htmlFor="eidInput">EID</label>
+              <input
+                id="eidInput"
+                type="text"
+                value={eid}
+                onChange={(event) => setEID(event.target.value)}
+                onPaste={(event) => {
+                  event.preventDefault();
+                  setEID(event.clipboardData.getData("text"));
+                }}
+                placeholder="EI123..."
+              />
+            </div>
+            <fieldset className={styles.ingredientSourceGroup}>
+              <legend>Include as ingredients</legend>
+              <label className={styles.inputCheckbox}>
+                <input
+                  type="checkbox"
+                  checked={includeSlotted}
+                  onChange={(event) => setIncludeSlotted(event.target.checked)}
+                />
+                Slotted stones
+              </label>
+              <label className={styles.inputCheckbox}>
+                <input
+                  type="checkbox"
+                  checked={includeFragments}
+                  onChange={(event) => setIncludeFragments(event.target.checked)}
+                />
+                Stone fragments
+              </label>
+            </fieldset>
+            <label className={`${styles.inputCheckbox} ${styles.saleCheckbox}`}>
               <input
                 type="checkbox"
-                checked={includeSlotted}
-                onChange={(event) => setIncludeSlotted(event.target.checked)}
+                checked={craftingSale}
+                onChange={(event) => setCraftingSale(event.target.checked)}
               />
-              Slotted stones
+              30% off crafting sale
             </label>
-            <label className={styles.inputCheckbox}>
-              <input
-                type="checkbox"
-                checked={includeFragments}
-                onChange={(event) => setIncludeFragments(event.target.checked)}
-              />
-              Stone fragments
-            </label>
-          </fieldset>
-          <label className={styles.inputCheckbox}>
-            <input
-              type="checkbox"
-              checked={craftingSale}
-              onChange={(event) => setCraftingSale(event.target.checked)}
-            />
-            30% off crafting sale
-          </label>
-          <div>
-            <label htmlFor="craft-inventory-source">Inventory source</label>
-            {" "}
-            <select
-              id="craft-inventory-source"
-              value={inventorySource}
-              onChange={(event) => setInventorySource(event.target.value as InventorySource)}
-            >
-              <option value="main">Main farm</option>
-              <option value="virtue">Path of Virtue</option>
-            </select>
+            <div className={styles.inputField}>
+              <label htmlFor="craft-inventory-source">Inventory source</label>
+              <select
+                id="craft-inventory-source"
+                value={inventorySource}
+                onChange={(event) => setInventorySource(event.target.value as InventorySource)}
+              >
+                <option value="main">Main farm</option>
+                <option value="virtue">Path of Virtue</option>
+              </select>
+            </div>
+            <button onClick={runOptimize} disabled={isLoading}>
+              {isLoading ? "Calculating..." : "Calculate"}
+            </button>
           </div>
+
+          <details
+            className={styles.prePlanDrawer}
+            open={prePlanOpen}
+            onToggle={(event) => setPrePlanOpen(event.currentTarget.open)}
+          >
+            <summary className={styles.prePlanSummary}>
+              <span className={styles.prePlanTitleRow}>
+                <span className={styles.prePlanCaret} aria-hidden="true">▶</span>
+                <span>Optional pre-plan ship sends</span>
+              </span>
+              <span className={styles.prePlanSummaryMeta}>
+                {prePlanTotalLaunches > 0 ? `${prePlanTotalLaunches.toLocaleString()} assumed sends` : "No assumed sends"}
+                {prePlanAssumptionsStale ? (
+                  <span className={styles.prePlanStaleText}>
+                    {" · "}
+                    assumptions changed; plans stale, re-calculate to update
+                  </span>
+                ) : lastPrePlanResult && (
+                  <>
+                    {" · "}
+                    {Math.max(0, lastPrePlanResult.appliedLaunches || 0).toLocaleString()} applied
+                    {lastPrePlanResult.skippedLaunches ? `, ${lastPrePlanResult.skippedLaunches.toLocaleString()} skipped` : ""}
+                    {prePlanAddedItemCount > 0 && (
+                      <>
+                        {" · "}
+                        <span className={styles.prePlanTooltipText} title={prePlanAdditionsTooltip}>
+                          expected additions across {prePlanAddedItemCount.toLocaleString()} item types
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
+              </span>
+            </summary>
+            <div className={styles.prePlanDrawerBody}>
+              <div className={styles.prePlanComposer}>
+                <div className={styles.prePlanInlineField}>
+                  <label htmlFor="pre-plan-ship-duration">Ship</label>
+                  <select
+                    id="pre-plan-ship-duration"
+                    value={draftPrePlanShipDuration}
+                    onChange={(event) => updateDraftPrePlanShipDuration(event.target.value)}
+                  >
+                    {shipDurationOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className={styles.prePlanInlineField}>
+                  <label htmlFor="pre-plan-target">Target</label>
+                  <select
+                    id="pre-plan-target"
+                    value={selectedDraftShipIsUntargetedOnly ? PRE_PLAN_UNTARGETED_TARGET_AFX_ID : draftPrePlanTargetAfxId}
+                    onChange={(event) => setDraftPrePlanTargetAfxId(Number(event.target.value))}
+                    disabled={selectedDraftShipIsUntargetedOnly}
+                    title={selectedDraftShipIsUntargetedOnly ? "This ship only supports untargeted sends." : undefined}
+                  >
+                    {PRE_PLAN_TARGET_OPTIONS.map((option) => (
+                      <option key={option.afxId} value={option.afxId}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className={`${styles.prePlanInlineField} ${styles.prePlanQuantityField}`}>
+                  <label htmlFor="pre-plan-launches">Sends</label>
+                  <input
+                    id="pre-plan-launches"
+                    type="text"
+                    inputMode="numeric"
+                    value={draftPrePlanLaunches}
+                    onChange={(event) => setDraftPrePlanLaunches(event.target.value.replace(/[^\d]/g, ""))}
+                    onBlur={() => setDraftPrePlanLaunches(String(Math.max(1, Math.min(10_000, Math.round(Number(draftPrePlanLaunches) || 1)))))}
+                  />
+                </div>
+                <button type="button" className={styles.prePlanAddButton} onClick={addPrePlanSend} disabled={prePlanSends.length >= 20}>
+                  Add
+                </button>
+              </div>
+              {prePlanSends.length > 0 && (
+                <div className={styles.prePlanList} aria-label="Pre-plan sends">
+                  {prePlanSends.map((send) => (
+                    <span key={send.id} className={styles.prePlanChip}>
+                      {prePlanSendLabel(send)}
+                      <button type="button" onClick={() => removePrePlanSend(send.id)} aria-label={`Remove ${prePlanSendLabel(send)}`}>
+                        x
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
         </div>
 
         {error && (

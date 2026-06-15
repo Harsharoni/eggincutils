@@ -64,6 +64,21 @@ export const profileQuerySchema = z
 
 export type ProfileQuery = z.infer<typeof profileQuerySchema>;
 
+export const prePlanSendSchema = z.object({
+  ship: z.string().trim().min(1),
+  durationType: z.enum(["SHORT", "LONG", "EPIC"]),
+  targetAfxId: z.coerce.number().int(),
+  launches: z.coerce
+    .number()
+    .finite()
+    .transform((value) => Math.max(0, Math.round(value)))
+    .pipe(nonNegativeIntSchema.max(10_000)),
+});
+
+export const prePlanSendsSchema = z.array(prePlanSendSchema).max(20);
+
+export type PrePlanSendRequest = z.infer<typeof prePlanSendSchema>;
+
 const plannerTargetSchema = z.object({
   targetItemId: z.string().trim().min(1, "targetItemId is required"),
   quantity: z.coerce
