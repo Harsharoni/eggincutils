@@ -1,11 +1,12 @@
 # flyctl launch added from .gitignore
+# Keep .git in the Docker context: Dockerfile runs scripts/assert-clean-git.sh
+# so raw `fly deploy` cannot publish uncommitted local changes.
 **/.next
 **/node_modules
 **/npm-debug.log*
 **/.DS_Store
 **/*.tsbuildinfo
 **/local_data
-fly.toml
 
 # Emacs temp/lock/autosave files
 **/*~

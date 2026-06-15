@@ -1,6 +1,7 @@
 import type { LootJson, MissionLevelLootStore, MissionTargetLootStore } from "./loot-data";
 import type { HighsSolveResult } from "./highs";
 import artifactConsumptionData from "../data/artifact-consumption.json";
+import missionYieldIndexData from "../data/mission-yield-index.json";
 import { isStoneFragmentKey, isUntargetedTargetAfxId, itemIdToCanonicalKey, itemIdToKey, itemKeyToDisplayName, itemKeyToId } from "./item-utils";
 import { getRecipe, recipes } from "./recipes";
 import {
@@ -34,6 +35,7 @@ type MissionAction = {
   ship: string;
   durationType: DurationType;
   level: number;
+  lootLevel: number;
   durationSeconds: number;
   targetAfxId: number;
   yields: Record<string, number>;
@@ -165,6 +167,8 @@ export type PlannerOptions = {
   allowedShipDurations?: Array<{ ship: string; durationType: string }>;
   selectedConsumptionItemIds?: string[];
   maxSolveMs?: number;
+  disableMissionYieldIndex?: boolean;
+  missionYieldIndexTopPerItem?: number;
   onProgress?: (event: PlannerProgressEvent) => void;
   onBenchmarkSample?: (sample: PlannerBenchmarkSample) => void;
   solverFn?: SolverFunction;
@@ -240,6 +244,9 @@ const PROGRESSION_CACHE_MAX_ENTRIES = 48;
 const MISSION_ACTION_CACHE_MAX_ENTRIES = 192;
 const CRAFT_SKELETON_CACHE_MAX_ENTRIES = 128;
 const BEST_CANDIDATE_CACHE_MAX_ENTRIES = 96;
+const MISSION_YIELD_INDEX_TOP_PER_ITEM_FAST = 24;
+const MISSION_YIELD_INDEX_TOP_PER_ITEM_NORMAL = 48;
+const MISSION_YIELD_INDEX_COVERAGE_REPAIR_PER_ITEM = 3;
 const DEFAULT_INCLUDE_SHINY_RARITIES: ShinyRaritySelection = {
   rare: true,
   epic: true,
@@ -289,7 +296,34 @@ type MissionActionCacheEntry = {
   actions: MissionAction[];
   rawCount: number;
   prunedCount: number;
+  indexFilteredCount: number;
+  coverageRepairCount: number;
 };
+
+type MissionYieldIndexPosting = {
+  actionId: string;
+  ratePerCapacity: number;
+  expectedPerHour: number;
+};
+
+type MissionYieldIndexBucket = "common" | "rare" | "epic" | "legendary" | "allRarities";
+
+type MissionYieldIndex = {
+  schemaVersion: number;
+  source?: {
+    topPerItem?: number;
+  };
+  byItem: Record<string, Partial<Record<MissionYieldIndexBucket, MissionYieldIndexPosting[]>>>;
+};
+
+type MissionActionFilter = {
+  key: string;
+  topPerItem: number;
+  allowedActionIds: Set<string>;
+  allowedMissionTargetKeys: Set<string>;
+};
+
+const MISSION_YIELD_INDEX = missionYieldIndexData as MissionYieldIndex;
 
 const closureCache = new LruCache<string, Set<string>>(CLOSURE_CACHE_MAX_ENTRIES);
 const progressionCache = new LruCache<string, ProgressionCacheEntry>(PROGRESSION_CACHE_MAX_ENTRIES);
@@ -828,6 +862,7 @@ async function buildMissionActionsForOptions(
         ship: option.ship,
         durationType: option.durationType,
         level: option.level,
+        lootLevel: levelLoot.level,
         durationSeconds: option.durationSeconds,
         targetAfxId: target.targetAfxId,
         yields,
@@ -884,6 +919,161 @@ function pruneSubDominatedActions(actions: MissionAction[]): MissionAction[] {
     }
     return false; // All yields sub-dominated → prune
   });
+}
+
+function missionYieldIndexActionId(action: MissionAction): string {
+  return `${action.missionId}|L${action.lootLevel}|T${action.targetAfxId}`;
+}
+
+function missionYieldIndexMissionTargetKey(missionId: string, targetAfxId: number): string {
+  return `${missionId}|T${targetAfxId}`;
+}
+
+function missionYieldIndexMissionTargetKeyFromActionId(actionId: string): string | null {
+  const match = actionId.match(/^(.*)\|L\d+\|T(-?\d+)$/);
+  if (!match) {
+    return null;
+  }
+  return missionYieldIndexMissionTargetKey(match[1], Number(match[2]));
+}
+
+function missionYieldIndexBuckets(selection: ShinyRaritySelection): MissionYieldIndexBucket[] {
+  const buckets: MissionYieldIndexBucket[] = ["common"];
+  if (selection.rare) {
+    buckets.push("rare");
+  }
+  if (selection.epic) {
+    buckets.push("epic");
+  }
+  if (selection.legendary) {
+    buckets.push("legendary");
+  }
+  if (selection.rare && selection.epic && selection.legendary) {
+    buckets.push("allRarities");
+  }
+  return buckets;
+}
+
+function buildMissionActionFilterFromYieldIndex(options: {
+  relevantItems: Set<string>;
+  missionDropRarities: ShinyRaritySelection;
+  topPerItem: number;
+}): MissionActionFilter | null {
+  const topPerItem = Math.max(1, Math.round(options.topPerItem));
+  const buckets = missionYieldIndexBuckets(options.missionDropRarities);
+  const allowedActionIds = new Set<string>();
+  const allowedMissionTargetKeys = new Set<string>();
+  const itemKeys = Array.from(options.relevantItems).sort();
+
+  for (const itemKey of itemKeys) {
+    const itemPostings = MISSION_YIELD_INDEX.byItem[itemKey];
+    if (!itemPostings) {
+      continue;
+    }
+    for (const bucket of buckets) {
+      const postings = itemPostings[bucket] || [];
+      for (const posting of postings.slice(0, topPerItem)) {
+        allowedActionIds.add(posting.actionId);
+        const missionTargetKey = missionYieldIndexMissionTargetKeyFromActionId(posting.actionId);
+        if (missionTargetKey) {
+          allowedMissionTargetKeys.add(missionTargetKey);
+        }
+      }
+    }
+  }
+
+  if (allowedActionIds.size === 0 && allowedMissionTargetKeys.size === 0) {
+    return null;
+  }
+
+  return {
+    key: [
+      "yield-index",
+      `top:${topPerItem}`,
+      `rar:${missionDropRarityCacheKey(options.missionDropRarities)}`,
+      `items:${itemKeys.join(",")}`,
+    ].join("::"),
+    topPerItem,
+    allowedActionIds,
+    allowedMissionTargetKeys,
+  };
+}
+
+function actionAllowedByMissionYieldIndex(action: MissionAction, filter: MissionActionFilter): boolean {
+  if (filter.allowedActionIds.has(missionYieldIndexActionId(action))) {
+    return true;
+  }
+  return filter.allowedMissionTargetKeys.has(
+    missionYieldIndexMissionTargetKey(action.missionId, action.targetAfxId)
+  );
+}
+
+function filterMissionActionsWithYieldIndex(
+  actions: MissionAction[],
+  relevantItems: Set<string>,
+  filter?: MissionActionFilter | null
+): { actions: MissionAction[]; indexFilteredCount: number; coverageRepairCount: number } {
+  if (!filter || actions.length === 0) {
+    return {
+      actions,
+      indexFilteredCount: 0,
+      coverageRepairCount: 0,
+    };
+  }
+
+  const selectedByKey = new Map<string, MissionAction>();
+  for (const action of actions) {
+    if (actionAllowedByMissionYieldIndex(action, filter)) {
+      selectedByKey.set(action.key, action);
+    }
+  }
+
+  let coverageRepairCount = 0;
+  const repairedItemKeys = Array.from(relevantItems).sort();
+  for (const itemKey of repairedItemKeys) {
+    const alreadyCovered = Array.from(selectedByKey.values()).some((action) => (action.yields[itemKey] || 0) > SCORE_EPS);
+    if (alreadyCovered) {
+      continue;
+    }
+    const repairActions = actions
+      .filter((action) => (action.yields[itemKey] || 0) > SCORE_EPS)
+      .sort((a, b) => {
+        const aRate = (a.yields[itemKey] || 0) / Math.max(1, a.durationSeconds);
+        const bRate = (b.yields[itemKey] || 0) / Math.max(1, b.durationSeconds);
+        const rateDiff = bRate - aRate;
+        if (Math.abs(rateDiff) > SCORE_EPS) {
+          return rateDiff;
+        }
+        return missionYieldIndexActionId(a).localeCompare(missionYieldIndexActionId(b));
+      })
+      .slice(0, MISSION_YIELD_INDEX_COVERAGE_REPAIR_PER_ITEM);
+    for (const action of repairActions) {
+      if (!selectedByKey.has(action.key)) {
+        selectedByKey.set(action.key, action);
+        coverageRepairCount += 1;
+      }
+    }
+  }
+
+  const filtered = Array.from(selectedByKey.values()).sort((a, b) => a.key.localeCompare(b.key));
+  return {
+    actions: filtered,
+    indexFilteredCount: Math.max(0, actions.length - filtered.length),
+    coverageRepairCount,
+  };
+}
+
+function missionYieldIndexEnabled(disabledByOption?: boolean, injectedLootData?: LootJson): boolean {
+  if (disabledByOption) {
+    return false;
+  }
+  if (injectedLootData) {
+    return false;
+  }
+  if (process.env.NODE_ENV === "test" || process.env.MISSION_YIELD_INDEX_DISABLED === "1") {
+    return false;
+  }
+  return MISSION_YIELD_INDEX.schemaVersion === 1;
 }
 
 function bestTimePerUnit(itemKey: string, actions: MissionAction[]): number {
@@ -2000,12 +2190,14 @@ function missionActionsCacheKey(options: {
   closureKey: string;
   missionDropRarities: ShinyRaritySelection;
   lootData: LootJson;
+  actionFilter?: MissionActionFilter | null;
 }): string {
   return [
     `opts:${missionOptionsFingerprint(options.missionOptions)}`,
     `closure:${options.closureKey}`,
     `rar:${missionDropRarityCacheKey(options.missionDropRarities)}`,
     `loot:${getLootObjectId(options.lootData)}`,
+    `filter:${options.actionFilter?.key || "none"}`,
   ].join("::");
 }
 
@@ -2015,12 +2207,14 @@ async function getMissionActionsForOptionsCached(options: {
   closureKey: string;
   lootData: LootJson;
   missionDropRarities: ShinyRaritySelection;
+  actionFilter?: MissionActionFilter | null;
 }): Promise<MissionActionCacheEntry> {
   const cacheKey = missionActionsCacheKey({
     missionOptions: options.missionOptions,
     closureKey: options.closureKey,
     missionDropRarities: options.missionDropRarities,
     lootData: options.lootData,
+    actionFilter: options.actionFilter,
   });
   const cached = missionActionsCache.get(cacheKey);
   if (cached) {
@@ -2035,10 +2229,17 @@ async function getMissionActionsForOptionsCached(options: {
   const builtPruned = pruneSubDominatedActions(
     builtRaw
   );
+  const filtered = filterMissionActionsWithYieldIndex(
+    builtPruned,
+    options.relevantItems,
+    options.actionFilter
+  );
   const created: MissionActionCacheEntry = {
-    actions: builtPruned,
+    actions: filtered.actions,
     rawCount: builtRaw.length,
     prunedCount: Math.max(0, builtRaw.length - builtPruned.length),
+    indexFilteredCount: filtered.indexFilteredCount,
+    coverageRepairCount: filtered.coverageRepairCount,
   };
   missionActionsCache.set(cacheKey, created);
   return created;
@@ -2798,6 +2999,7 @@ async function refineScaledPlanWithProgression(options: {
       ship: option.ship,
       durationType: option.durationType,
       level: option.level,
+      lootLevel: option.level,
       durationSeconds: option.durationSeconds,
       targetAfxId: original.targetAfxId,
       yields: {},
@@ -3937,12 +4139,20 @@ async function planForTargetHeuristic(
   const closure = getTargetClosureCached(targetKey);
   const closureKey = closureFingerprint(closure);
   const lootData = plannerOptions.lootData ?? await getDefaultLootData();
+  const actionFilter = missionYieldIndexEnabled(false, plannerOptions.lootData)
+    ? buildMissionActionFilterFromYieldIndex({
+        relevantItems: closure,
+        missionDropRarities,
+        topPerItem: MISSION_YIELD_INDEX_TOP_PER_ITEM_FAST,
+      })
+    : null;
   const actionsEntry = await getMissionActionsForOptionsCached({
     missionOptions: profile.missionOptions,
     relevantItems: closure,
     closureKey,
     lootData,
     missionDropRarities,
+    actionFilter,
   });
   const actions = actionsEntry.actions;
 
@@ -4327,6 +4537,20 @@ export async function planForTarget(
   const consumptionOptions = buildConsumptionOptionsForClosure(selectedConsumptionItemKeys, closure);
   const closureKey = closureFingerprint(closure);
   const representativeBlockProfile = profile;
+  const missionYieldIndexTopPerItem = Math.max(
+    1,
+    Math.round(
+      plannerOptions.missionYieldIndexTopPerItem ||
+        (fastMode ? MISSION_YIELD_INDEX_TOP_PER_ITEM_FAST : MISSION_YIELD_INDEX_TOP_PER_ITEM_NORMAL)
+    )
+  );
+  const missionActionFilter = missionYieldIndexEnabled(plannerOptions.disableMissionYieldIndex, injectedLootData)
+    ? buildMissionActionFilterFromYieldIndex({
+        relevantItems: closure,
+        missionDropRarities,
+        topPerItem: missionYieldIndexTopPerItem,
+      })
+    : null;
 
   const progressionKey = profileProgressionCacheKey(profile, allowedDurationsKey);
   const cachedProgression = progressionCache.get(progressionKey);
@@ -4354,6 +4578,7 @@ export async function planForTarget(
     `consume:${consumptionOptions.map((option) => option.sourceItemKey).join(",") || "none"}`,
     `mode:${objectiveMode}:${priorityTime <= SCORE_EPS ? "ge" : "mix"}:${objectiveContext.minimumTimePriority}`,
     `fast:${fastMode ? 1 : 0}`,
+    `filter:${missionActionFilter?.key || "none"}`,
   ].join("::");
   const preferredCandidateFingerprint = bestCandidateFingerprintCache.get(candidateReuseKey);
   if (preferredCandidateFingerprint) {
@@ -4387,6 +4612,7 @@ export async function planForTarget(
     closureKey,
     lootData,
     missionDropRarities,
+    actionFilter: missionActionFilter,
   });
   const baseActions = baseActionsEntry.actions;
   const subDominatedPrunedCount = baseActionsEntry.prunedCount;
@@ -4394,6 +4620,13 @@ export async function planForTarget(
     reportProgress({
       phase: "init",
       message: `Pruned ${subDominatedPrunedCount} sub-dominated actions (${baseActions.length} remaining).`,
+    });
+    await yieldForProgressFlush();
+  }
+  if (baseActionsEntry.indexFilteredCount > 0) {
+    reportProgress({
+      phase: "init",
+      message: `Mission yield index filtered ${baseActionsEntry.indexFilteredCount.toLocaleString()} low-ranked actions from the reference model (${baseActions.length.toLocaleString()} retained).`,
     });
     await yieldForProgressFlush();
   }
@@ -4463,6 +4696,8 @@ export async function planForTarget(
     let prunedCandidateCount = 0;
     let completedCandidateCount = 0;
     let timeBudgetExceeded = false;
+    let indexFilteredActionCount = baseActionsEntry.indexFilteredCount;
+    let indexCoverageRepairActionCount = baseActionsEntry.coverageRepairCount;
     const candidateLoopStartedAtMs = Date.now();
     const estimateCandidateEtaMs = (): number | null => {
       if (completedCandidateCount <= 0 || completedCandidateCount >= candidateTotal) {
@@ -4559,7 +4794,10 @@ export async function planForTarget(
           closureKey,
           lootData,
           missionDropRarities,
+          actionFilter: missionActionFilter,
         });
+        indexFilteredActionCount += candidateEntry.indexFilteredCount;
+        indexCoverageRepairActionCount += candidateEntry.coverageRepairCount;
         candidateActions = candidateEntry.actions;
         actionCache.set(candidateKey, candidateActions);
       }
@@ -5991,6 +6229,16 @@ export async function planForTarget(
           .map((itemKey) => itemKeyToDisplayName(itemKey))
           .join(", ")}.`
       );
+    }
+    if (missionActionFilter && indexFilteredActionCount > 0) {
+      notes.push(
+        `Mission yield index candidate reduction enabled: considered top ${missionActionFilter.topPerItem.toLocaleString()} ranked mission/target pairs per required item and filtered ${indexFilteredActionCount.toLocaleString()} low-ranked action entries before solving.`
+      );
+      if (indexCoverageRepairActionCount > 0) {
+        notes.push(
+          `Mission yield index coverage repair restored ${indexCoverageRepairActionCount.toLocaleString()} action entries so every item with full-model mission coverage retained at least one candidate.`
+        );
+      }
     }
     notes.push(
       "Planner uses expected-drop values with unified solver-backed craft+mission allocation, integrated phased ship leveling, bounded ship-progression horizon search, and 3 mission slots. Re-run after returns."

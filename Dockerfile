@@ -8,8 +8,12 @@ RUN npm ci
 # ---- build ----
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN sh scripts/assert-clean-git.sh
 
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
